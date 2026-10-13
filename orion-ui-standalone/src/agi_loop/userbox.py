@@ -1,6 +1,6 @@
 """Users' Linux boxes — one Fly machine and disk per user loop, paid from their credits.
 
-The owner's minds have fixed boxes (services/elysia-linux, reached over the private network).
+The owner's minds have fixed boxes (services/agent-linux, reached over the private network).
 A signed-in user's loop can get its own: a machine plus a volume in the app
 ``orionforge-user-boxes``, created through the Fly Machines API. That app lives on its own
 private network, so a user's box can't reach the engine, the owner's boxes, or other users'
@@ -27,7 +27,7 @@ from typing import Callable, Optional
 from .linux import Linux
 
 APP = os.environ.get("USER_BOX_APP", "orionforge-user-boxes")
-IMAGE = os.environ.get("USER_BOX_IMAGE", "registry.fly.io/orionforge-user-boxes:userbox-v1")
+IMAGE = os.environ.get("USER_BOX_IMAGE", "registry.fly.io/orionforge-user-boxes:userbox-v2")
 REGION = os.environ.get("USER_BOX_REGION", "iad")
 API = "https://api.machines.dev/v1"
 BOX_USER = "agent"
@@ -159,7 +159,7 @@ class Box:
             api("DELETE", f"/apps/{APP}/volumes/{vol['id']}")
             raise
         now = time.time()
-        box = cls(data_dir, {"machine_id": m["id"], "volume_id": vol["id"], "token": token,
+        box = cls(data_dir, {"machine_id": m["id"], "volume_id": vol["id"], "token": token, "image": IMAGE,
                              "memory_mb": memory_mb, "disk_gb": int(disk_gb), "created_at": now,
                              "state": "started" if start else "stopped",
                              "run_metered_at": now, "disk_metered_at": now, "owed": 0.0})
@@ -167,7 +167,14 @@ class Box:
         return box
 
     def start(self, api: Callable = None):
-        (api or _api)("POST", f"/apps/{APP}/machines/{self.machine_id}/start")
+        api = api or _api
+        if self.r.get("image") != IMAGE:
+            # A newer image shipped since this box was made: move it over before waking it.
+            api("POST", f"/apps/{APP}/machines/{self.machine_id}",
+                {"config": _machine_config(self.r["token"], self.r["volume_id"], self.r["memory_mb"]),
+                 "skip_launch": True})
+            self.r["image"] = IMAGE
+        api("POST", f"/apps/{APP}/machines/{self.machine_id}/start")
         self.r["state"], self.r["run_metered_at"] = "started", time.time()
         self.save()
 
@@ -186,7 +193,7 @@ class Box:
         api("POST", f"/apps/{APP}/machines/{self.machine_id}",
             {"config": _machine_config(self.r["token"], self.r["volume_id"], memory_mb),
              "skip_launch": self.r.get("state") != "started"})
-        self.r["memory_mb"] = memory_mb
+        self.r["memory_mb"], self.r["image"] = memory_mb, IMAGE
         self.save()
 
     def grow_disk(self, disk_gb: int, api: Callable = None):

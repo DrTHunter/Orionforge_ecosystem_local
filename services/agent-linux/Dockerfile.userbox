@@ -20,10 +20,12 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd -m -u 1000 -s /bin/bash ${AGENT_USER} \
     && echo "${AGENT_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${AGENT_USER} && chmod 440 /etc/sudoers.d/${AGENT_USER}
 
-COPY shell_server.py start.sh /opt/elysia/
-COPY userbox-README.md /opt/elysia/README.md
-RUN chmod +x /opt/elysia/start.sh
+COPY shell_server.py start.sh /opt/agent/
+COPY userbox-README.md /opt/agent/README.md
+# Continuity tools distilled from the owner's minds' own machines; start.sh copies them into ~/kit once.
+COPY kit /opt/agent/kit
+RUN chmod +x /opt/agent/start.sh && find /opt/agent/kit \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080 8081
-CMD ["/opt/elysia/start.sh"]
+CMD ["/opt/agent/start.sh"]

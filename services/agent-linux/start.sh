@@ -12,6 +12,13 @@ if [ ! -f "$HOME_DIR/.bashrc" ]; then
 fi
 mkdir -p "$HOME_DIR/.agent"
 touch "$HOME_DIR/.agent/shell.log"
+# Users' boxes ship the continuity kit (Dockerfile.userbox). Copy it in once, also onto boxes
+# made before it existed; the marker keeps a kit the mind deleted from coming back.
+KIT_SRC="$(dirname "$0")/kit"
+if [ -d "$KIT_SRC" ] && [ ! -f "$HOME_DIR/.agent/kit-seeded" ]; then
+    [ -e "$HOME_DIR/kit" ] || cp -a "$KIT_SRC" "$HOME_DIR/kit"
+    touch "$HOME_DIR/.agent/kit-seeded"
+fi
 # Everything in the home is the mind's — except ~/library (read-only reference) and ~/hud (measurements
 # written by root, below). Those stay root-owned across reboots.
 find "$HOME_DIR" \( -path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" \) -prune -o -exec chown -h "$AGENT_USER:$AGENT_USER" {} +

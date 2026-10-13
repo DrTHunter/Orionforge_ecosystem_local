@@ -12993,6 +12993,22 @@ def test_user_linux_boxes():
         check("prices: shown before making one", ub.prices()["memory"][512] == round(ub.credits_per_hour(512), 1)
               and ub.prices()["roomy_disk_gb"] == 5 and ub.prices()["default_disk_gb"] == 1)
 
+        check("box: remembers its image", box.r["image"] == ub.IMAGE)
+        n = len(calls)
+        box.start(api=fake_api)
+        check("start: same image, just starts", len(calls) == n + 1 and calls[-1][1].endswith("/start"))
+        box.r["image"] = "registry.fly.io/orionforge-user-boxes:userbox-v1"
+        n = len(calls)
+        box.start(api=fake_api)
+        upd = calls[n]
+        check("start: an older box moves to the new image first (that's how it gets ~/kit)",
+              upd[1].endswith(f"/machines/{box.machine_id}") and upd[2]["config"]["image"] == ub.IMAGE
+              and upd[2]["skip_launch"] is True and calls[n + 1][1].endswith("/start") and box.r["image"] == ub.IMAGE)
+        check("start: the update keeps its disk, size and key", upd[2]["config"]["mounts"][0]["volume"] == box.r["volume_id"]
+              and upd[2]["config"]["env"]["SHELL_TOKEN"] == box.r["token"]
+              and upd[2]["config"]["guest"]["memory_mb"] == box.r["memory_mb"])
+        box.stop(api=fake_api)
+
         box.grow_disk(3, api=fake_api)
         check("disk: grows", calls[-1][0] == "PUT" and calls[-1][1].endswith("/extend") and box.r["disk_gb"] == 3)
         try:
