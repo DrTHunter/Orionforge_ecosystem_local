@@ -29,7 +29,7 @@ import threading
 from collections import OrderedDict
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Tuple
 
 from mcp_server.engine import OrionEngine
 
@@ -89,6 +89,16 @@ def _warm_shared() -> None:
     threading.Thread(target=_run, name="orion-remote-warm", daemon=True).start()
 
 
+# Optional (agent, user_id) -> bool check the web app registers so owner-only
+# agents stay hidden from every other user's engine.
+_agent_access: Callable[[str, str], bool] | None = None
+
+
+def set_agent_access(check: Callable[[str, str], bool]) -> None:
+    global _agent_access
+    _agent_access = check
+
+
 def set_current_user(user_id: str) -> None:
     """Set the user whose engine subsequent tool calls in this context resolve to."""
     _USER_CTX.set(user_id or "")
@@ -115,6 +125,7 @@ def engine_for_user(user_id: str) -> OrionEngine:
         if len(_engines) >= _MAX_ENGINES:
             _engines.popitem(last=False)  # evict least-recently-used
         eng = OrionEngine(data_dir=str(_data_users_root() / uid), user=uid)
+        eng.agent_filter = lambda agent, _uid=uid: _agent_access is None or _agent_access(agent, _uid)
         # Reuse the global soul-script index instead of rebuilding it per user.
         try:
             eng._notes_faiss = _get_shared_notes()

@@ -13103,6 +13103,73 @@ def test_user_linux_boxes():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_owner_only_agents():
+    """Owner-only agents (RESTRICTED_AGENTS, empty in this edition) are visible to the
+    admin account only: listings, every /api/profiles/{name} route, new chats and the
+    hosted MCP engine. Exercised by temporarily locking k_os."""
+    print("\n=== TORTURE: Owner-only agents ===")
+    import asyncio
+    from types import SimpleNamespace
+    import web.app as _app
+    from mcp_server.engine import OrionEngine
+
+    check("no owner-only agents ship in the local edition", not _app.RESTRICTED_AGENTS)
+    orig = _app.RESTRICTED_AGENTS
+    _app.RESTRICTED_AGENTS = frozenset({"k_os"})
+    # This edition ships no admin accounts; add a throwaway id + email for the test.
+    admin_id, admin_email = "admin-uid", "owner@example.com"
+    _app.ADMIN_USER_IDS.add(admin_id)
+    _app.ADMIN_EMAILS.add(admin_email)
+    email_admin = "email-admin-uid"
+    stranger = "stranger-uid"
+    _app._ADMIN_IDS_SEEN.discard(email_admin)
+    try:
+        check("locked agent hidden from a regular user", not _app._can_access_agent("k_os", stranger))
+        check("locked agent hidden with no user", not _app._can_access_agent("k_os", ""))
+        check("locked agent visible to ADMIN_USER_IDS", _app._can_access_agent("k_os", admin_id))
+        check("locked agent visible in local mode", _app._can_access_agent("k_os", "__local__"))
+        check("other agents open to everyone", _app._can_access_agent("supervisor", stranger))
+
+        check("email admin locked before login", not _app._can_access_agent("k_os", email_admin))
+        _app._user_is_admin({"id": email_admin, "email": admin_email})
+        check("email admin unlocked after login", _app._can_access_agent("k_os", email_admin))
+
+        tok = _app._current_user_id.set(stranger)
+        try:
+            vis = _app._visible_agents(stranger)
+        finally:
+            _app._current_user_id.reset(tok)
+        check("_visible_agents drops the locked agent", "k_os" not in vis and len(vis) > 0)
+
+        def _req(uid, body=None):
+            async def _json():
+                return body or {}
+            return SimpleNamespace(state=SimpleNamespace(user={"id": uid, "email": "x@example.com"}), json=_json)
+
+        for fn in (_app.api_profile_get, _app.api_profile_update, _app.api_profile_delete,
+                   _app.api_profile_config, _app.api_profile_avatar, _app.api_profile_knowledge):
+            res = asyncio.run(fn("k_os", _req(stranger)))
+            check(f"{fn.__name__} refuses the locked agent for a regular user",
+                  getattr(res, "status_code", 200) == 404)
+        res = asyncio.run(_app.api_chat_new(_req(stranger, {"agent": "k_os"})))
+        check("new chat with the locked agent refused", getattr(res, "status_code", 200) == 404)
+
+        eng = OrionEngine(user=stranger)
+        eng.agent_filter = lambda a: _app._can_access_agent(a, stranger)
+        check("MCP list hides the locked agent", "k_os" not in eng.list_agents())
+        check("MCP won't resolve the locked agent", eng.resolve_agent("k_os") is None)
+        check("MCP summon of the locked agent errors", "error" in eng.call_agent("k_os"))
+        check("MCP soul search of the locked agent is empty", eng.soul_search("k_os", "who are you") == [])
+        owner = OrionEngine(user=admin_id)
+        owner.agent_filter = lambda a: _app._can_access_agent(a, admin_id)
+        check("MCP admin still sees the locked agent", "k_os" in owner.list_agents())
+    finally:
+        _app.RESTRICTED_AGENTS = orig
+        _app._ADMIN_IDS_SEEN.discard(email_admin)
+        _app.ADMIN_USER_IDS.discard(admin_id)
+        _app.ADMIN_EMAILS.discard(admin_email)
+
+
 if __name__ == "__main__":
     test_boundary_policy()
     test_pii_guard_extended()
@@ -13167,6 +13234,7 @@ if __name__ == "__main__":
     test_agi_loop_per_user()
     test_load_optimizations()
     test_user_linux_boxes()
+    test_owner_only_agents()
     test_settings_helpers()
     test_vault_search_min_score()
     test_tag_sort_mode()

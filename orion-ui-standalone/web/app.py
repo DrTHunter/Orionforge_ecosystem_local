@@ -123,8 +123,9 @@ for _d in [_CHATS_DIR, _NOTES_DIR, _VAULT_PATH.parent, _FAISS_DIR, _TRASH_DIR]:
 # `mcp` dependency degrades gracefully (the rest of the app still boots).
 from web import mcp_tokens
 try:
-    from mcp_server.remote import build_mcp_app, set_current_user
+    from mcp_server.remote import build_mcp_app, set_current_user, set_agent_access
     _mcp_inner_app, _mcp_server = build_mcp_app()
+    set_agent_access(lambda agent, uid: _can_access_agent(agent, uid))
 except Exception as _mcp_exc:  # pragma: no cover - only when `mcp` isn't installed
     _mcp_inner_app, _mcp_server, set_current_user = None, None, None
     logging.getLogger("soulscript").warning("[mcp] remote MCP disabled: %s", _mcp_exc)
@@ -1424,32 +1425,34 @@ def _list_agents(user_id: str | None = None) -> list[str]:
         agents |= set(p.stem for p in user_profiles_dir(uid).glob("*.yaml"))
     return sorted(agents)
 
-# Private agents restricted to specific user IDs. Even though their profile
-# files live in the shared profiles dir, they stay hidden from everyone except
-# the listed UIDs. "__local__" (single-user local mode) always retains access.
-RESTRICTED_AGENTS: dict[str, set[str]] = {}
+# Owner-only agents. Their profile files live in the shared profiles dir, but
+# only the admin account (ADMIN_USER_IDS, or an ADMIN_EMAILS login recorded in
+# _ADMIN_IDS_SEEN) may list, read, edit or chat with them. "__local__"
+# (single-user local mode) always retains access. None in this edition.
+RESTRICTED_AGENTS: frozenset[str] = frozenset()
 
 
 def _can_access_agent(agent: str, user_id: str | None) -> bool:
-    """Whether `agent` is visible to `user_id`.
-
-    Non-restricted agents are always allowed here (their visibility is still
-    governed by the store/unlock rules in _list_unlocked_agents).
-    """
-    allowed = RESTRICTED_AGENTS.get(agent)
-    if allowed is None:
+    """Whether `agent` is visible to `user_id`."""
+    if agent not in RESTRICTED_AGENTS:
         return True
     if user_id == "__local__":
         return True
-    return bool(user_id) and user_id in allowed
+    return bool(user_id) and (user_id in ADMIN_USER_IDS or user_id in _ADMIN_IDS_SEEN)
+
+
+def _visible_agents(user_id: str | None = None) -> list[str]:
+    """_list_agents() minus the owner-only agents the user may not see."""
+    uid = user_id or _current_user_id.get("__local__")
+    return [a for a in _list_agents(uid) if _can_access_agent(a, uid)]
 
 
 def _list_unlocked_agents(request: Request) -> list[str]:
     """Return agents the current user can access.
 
     Every agent is available to every user (pay-per-use model, no per-agent
-    paywall). Restricted agents (RESTRICTED_AGENTS) are filtered out for
-    everyone except their allowed UIDs, regardless of admin status. The list
+    paywall). Owner-only agents (RESTRICTED_AGENTS) are filtered out for
+    everyone but the admin account. The list
     is then ordered by _prioritize_default_agent so the pinned agents (K-OS
     first) lead.
     """
@@ -3254,7 +3257,7 @@ _TOOL_CATALOGUE = [
 
 @app.get("/tools", response_class=HTMLResponse)
 async def page_tools(request: Request):
-    agents = _list_agents()
+    agents = _visible_agents()
     # Gather pricing data for the cost_tracker tool panel
     pricing = _load_pricing()
     store = _load_connections()
@@ -4219,7 +4222,7 @@ async def page_agi_loop(request: Request):
         "is_owner": _loop_owner() is None,
         "max_loops": _USER_MAX_LOOPS,
         "linux_user": _loop_linux_user(lid),
-        "agents": _list_agents(),
+        "agents": _visible_agents(),
         "config": (d.config if d else LoopConfig()).to_dict(),
         "connections": connections,
     })
@@ -4285,7 +4288,7 @@ async def api_agi_loop_create(request: Request):
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "reason": "Expected an object"}, 400)
     cfg = LoopConfig.from_dict(body.get("config") if isinstance(body.get("config"), dict) else {})
-    if cfg.agent not in _list_agents():
+    if cfg.agent not in _visible_agents():
         return JSONResponse({"ok": False, "reason": f"No agent called '{cfg.agent}'"}, 400)
     if _loop_owner() and len(_loop_ids()) >= _USER_MAX_LOOPS:
         return JSONResponse({"ok": False, "reason": f"You can have up to {_USER_MAX_LOOPS} loops. "
@@ -6076,8 +6079,10 @@ async def api_chat_history(request: Request):
 async def api_chat_new(request: Request):
     body = await request.json()
     uid = _get_user_id(request)
-    agents = _list_agents()
+    agents = _visible_agents(uid)
     agent = body.get("agent", agents[0] if agents else "agent")
+    if not _can_access_agent(agent, uid):
+        return JSONResponse({"error": "Agent not found"}, 404)
     return _create_new_chat(agent, user_id=uid)
 
 @app.get("/api/chat/{chat_id}")
@@ -6272,6 +6277,8 @@ async def api_trash_permanently_delete(trash_id: str, request: Request):
 
 @app.get("/api/profiles/{name}")
 async def api_profile_get(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     uid = _get_user_id(request)
     profile = _load_profile(name, user_id=uid)
     if not profile:
@@ -6282,6 +6289,8 @@ async def api_profile_get(name: str, request: Request):
 
 @app.put("/api/profiles/{name}")
 async def api_profile_update(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     body = await request.json()
     uid = _get_user_id(request)
     if "system_prompt" in body:
@@ -6317,6 +6326,8 @@ async def api_profile_create(request: Request):
 
 @app.delete("/api/profiles/{name}")
 async def api_profile_delete(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     """Soft-delete: move agent to trash (30-day retention)."""
     uid = _get_user_id(request)
     # The caller's own agent (or their private copy of a built-in) first.
@@ -6333,6 +6344,8 @@ async def api_profile_delete(name: str, request: Request):
 
 @app.put("/api/profiles/{name}/config")
 async def api_profile_config(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     """Update individual config fields for an agent (display_name, description, model, etc.)."""
     body = await request.json()
     uid = _get_user_id(request)
@@ -6371,6 +6384,8 @@ async def api_profile_config(name: str, request: Request):
 
 @app.put("/api/profiles/{name}/avatar")
 async def api_profile_avatar(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     """Update avatar image, colour, or photo crop/position for an agent."""
     body = await request.json()
     uid = _get_user_id(request)
@@ -6848,6 +6863,8 @@ async def api_profile_codex_draft(request: Request):
 
 @app.put("/api/profiles/{name}/knowledge")
 async def api_profile_knowledge(name: str, request: Request):
+    if not _can_access_agent(name, _get_user_id(request)):
+        return JSONResponse({"error": "Not found"}, 404)
     body = await request.json()
     uid = _get_user_id(request)
     cfg = _get_agent_config(name, user_id=uid)
@@ -9345,4 +9362,4 @@ async def api_move_chat(chat_id: str, request: Request):
 async def api_health():
     fm = _get_faiss_memory()
     vs = _get_vault_store()
-    return {"status": "ok", "agents": _list_agents(), "vault_loaded": fm is not None, "vault_store": vs is not None}
+    return {"status": "ok", "agents": _visible_agents(), "vault_loaded": fm is not None, "vault_store": vs is not None}

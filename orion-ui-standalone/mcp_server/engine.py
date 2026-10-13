@@ -27,7 +27,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ── Offline embedding model ─────────────────────────────────────────
 # all-MiniLM-L6-v2 is always pre-cached (locally in ~/.cache, and baked into
@@ -57,6 +57,8 @@ class OrionEngine:
             data_dir or os.environ.get("ORION_DATA_DIR", str(self.repo / "data"))
         ).resolve()
         self.user = user or os.environ.get("ORION_USER", "local")
+        # Set by the hosted server: hides owner-only agents from other users.
+        self.agent_filter: Optional[Callable[[str], bool]] = None
 
         self.profiles_dir = self.repo / "profiles"
         self.prompts_dir = self.repo / "prompts"
@@ -81,7 +83,10 @@ class OrionEngine:
     def list_agents(self) -> List[str]:
         if not self.profiles_dir.exists():
             return []
-        return sorted(p.stem for p in self.profiles_dir.glob("*.yaml"))
+        agents = sorted(p.stem for p in self.profiles_dir.glob("*.yaml"))
+        if self.agent_filter is not None:
+            agents = [a for a in agents if self.agent_filter(a)]
+        return agents
 
     def resolve_agent(self, name: str) -> Optional[str]:
         """Case/spacing-tolerant lookup so 'Marcus' or 'lux umbra' resolve."""
@@ -199,7 +204,9 @@ class OrionEngine:
 
     def soul_search(self, agent: str, query: str, k: int = 5) -> List[Tuple[str, str, float]]:
         """Return [(section_path, text, score)] from the agent's soul script."""
-        agent = self.resolve_agent(agent) or agent
+        agent = self.resolve_agent(agent)
+        if not agent:
+            return []
         nf = self._get_notes_faiss()
         try:
             results = nf.search(query, top_k=k, note_ids={f"__soul_script__{agent}"})
