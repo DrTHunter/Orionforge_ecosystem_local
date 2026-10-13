@@ -19,6 +19,7 @@ Per-user config is via environment (see mcp_server/README.md):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -87,79 +88,87 @@ def register_tools(server: "FastMCP", get_engine: "Callable[[], OrionEngine]") -
     identical in both transports — only how the engine is resolved differs.
     """
 
-    @server.tool()
-    def list_agents() -> List[str]:
-        """List every OrionForge agent you can summon."""
-        return get_engine().list_agents()
-
-    @server.tool()
-    def call_agent(name: str, message: str = "") -> str:
-        """Summon any agent by name. Returns its identity prompt plus the soul-script
-        sections most relevant to `message` (retrieved from your FAISS). Adopt the
-        returned persona for your reply."""
-        return _format_persona(get_engine().call_agent(name, message))
-
-    @server.tool()
-    def get_default_agent() -> str:
-        """Return the current default personality (agent name), or 'none'."""
-        return get_engine().get_default_agent() or "none"
-
-    @server.tool()
-    def set_default_agent(name: str) -> dict:
-        """Set the default personality used when you summon without naming an agent."""
-        return get_engine().set_default_agent(name)
-
-    @server.tool()
-    def load_default(message: str = "") -> str:
-        """Summon the default personality (set via set_default_agent)."""
+    def _summon_default(message: str) -> str:
         engine = get_engine()
         agent = engine.resolve_default_agent()
         if not agent:
             return "No agents are available to summon."
         return _format_persona(engine.call_agent(agent, message))
 
+    # Tools are async and run their bodies in a worker thread: FastMCP calls a
+    # sync tool inline on the event loop, so a slow first FAISS build (model
+    # load, vault index) would otherwise stall every request the hosting web
+    # app serves. to_thread copies contextvars, so remote.py's per-request user
+    # still resolves inside get_engine().
+
     @server.tool()
-    def search_soul_script(agent: str, query: str, k: int = 5) -> list:
+    async def list_agents() -> List[str]:
+        """List every OrionForge agent you can summon."""
+        return await asyncio.to_thread(lambda: get_engine().list_agents())
+
+    @server.tool()
+    async def call_agent(name: str, message: str = "") -> str:
+        """Summon any agent by name. Returns its identity prompt plus the soul-script
+        sections and Memory Vault memories most relevant to `message`. Adopt the
+        returned persona for your reply."""
+        return await asyncio.to_thread(lambda: _format_persona(get_engine().call_agent(name, message)))
+
+    @server.tool()
+    async def get_default_agent() -> str:
+        """Return the current default personality (agent name), or 'none'."""
+        return await asyncio.to_thread(lambda: get_engine().get_default_agent() or "none")
+
+    @server.tool()
+    async def set_default_agent(name: str) -> dict:
+        """Set the default personality used when you summon without naming an agent."""
+        return await asyncio.to_thread(lambda: get_engine().set_default_agent(name))
+
+    @server.tool()
+    async def load_default(message: str = "") -> str:
+        """Summon the default personality (set via set_default_agent)."""
+        return await asyncio.to_thread(_summon_default, message)
+
+    @server.tool()
+    async def search_soul_script(agent: str, query: str, k: int = 5) -> list:
         """Semantic search over a single agent's soul script (your FAISS)."""
-        return [
+        return await asyncio.to_thread(lambda: [
             {"section": sp, "text": t, "score": round(s, 3)}
             for sp, t, s in get_engine().soul_search(agent, query, k=k)
-        ]
+        ])
 
     @server.tool()
-    def search_memory(query: str, k: int = 8) -> list:
+    async def search_memory(query: str, k: int = 8) -> list:
         """Semantic search over the OrionForge unified Memory Vault."""
-        return get_engine().search_memory(query, k=k)
+        return await asyncio.to_thread(lambda: get_engine().search_memory(query, k=k))
 
     @server.tool()
-    def save_memory(text: str, category: str = "other", agent: str = "") -> dict:
+    async def save_memory(text: str, category: str = "other", agent: str = "") -> dict:
         """Save a memory into the OrionForge Memory Vault, scoped to an agent (the
         default personality if omitted) — the same place the app's chat saves, so
         it is recalled there and here. Categories: bio, preference, project, goal,
         health, plan, other, etc."""
-        return get_engine().save_memory(text, category=category, agent=agent or None)
+        return await asyncio.to_thread(
+            lambda: get_engine().save_memory(text, category=category, agent=agent or None)
+        )
 
     @server.tool()
-    def save_project_summary(summary: str, title: str = "", tags: Optional[List[str]] = None) -> dict:
+    async def save_project_summary(summary: str, title: str = "", tags: Optional[List[str]] = None) -> dict:
         """Save a short project summary into the OrionForge unified Memory Vault so it
         persists and is searchable across agents and the app."""
-        return get_engine().save_project_summary(summary, title=title, tags=tags)
+        return await asyncio.to_thread(
+            lambda: get_engine().save_project_summary(summary, title=title, tags=tags)
+        )
 
     # ── Prompts (surface as slash commands in MCP clients) ─────────────
     @server.prompt()
-    def summon(agent: str, message: str = "") -> str:
-        """Summon an OrionForge agent by name (identity + soul script)."""
-        return _format_persona(get_engine().call_agent(agent, message))
+    async def summon(agent: str, message: str = "") -> str:
+        """Summon an OrionForge agent by name (identity + soul script + memories)."""
+        return await asyncio.to_thread(lambda: _format_persona(get_engine().call_agent(agent, message)))
 
     @server.prompt()
-    def default_personality(message: str = "") -> str:
+    async def default_personality(message: str = "") -> str:
         """Summon your default OrionForge personality."""
-        engine = get_engine()
-        agent = engine.resolve_default_agent()
-        if not agent:
-            return "No agents are available to summon."
-        return _format_persona(engine.call_agent(agent, message))
-
+        return await asyncio.to_thread(_summon_default, message)
 
 # Register the stdio server's tools against the process-global engine.
 register_tools(mcp, _get_engine)
