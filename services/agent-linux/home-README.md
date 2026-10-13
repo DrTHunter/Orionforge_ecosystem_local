@@ -1,7 +1,7 @@
 # This machine is yours
 
 Ubuntu 24.04, headless. You are `supervisor`, with passwordless `sudo`.
-`/home/supervisor` is a 30 GB persistent volume: everything here survives restarts.
+`/home/supervisor` is a 1 GB persistent volume: everything here survives restarts.
 Anything outside your home is rebuilt from the image on every deploy.
 
 Outbound internet works (apt, pip, git, curl). Nothing can reach you from

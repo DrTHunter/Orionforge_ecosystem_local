@@ -16,7 +16,7 @@ DEFINITION = {
     "name": "linux",
     "description": (
         "Your own Linux machine (Ubuntu 24.04, you are 'supervisor' with sudo). Runs one bash command and returns "
-        "its exit code and output. /home/supervisor is a 30 GB persistent disk — build there. Outbound internet "
+        "its exit code and output. /home/supervisor is a 1 GB persistent disk — build there. Outbound internet "
         "works (apt, pip, git, curl). Each call is a fresh shell: chain with && or pass cwd. "
         "Long-running things belong in tmux or nohup, not in one call. "
         "The operator watches this machine from the Linux tab: a live feed of every command you run, and your file "

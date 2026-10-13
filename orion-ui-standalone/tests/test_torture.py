@@ -11766,7 +11766,7 @@ def test_agi_loop_preamble_and_linux():
 
     repo = Path(__file__).resolve().parent.parent.parent
     t = (repo / "services" / "agent-linux" / "fly.toml").read_text(encoding="utf-8")
-    check("fly.toml: 9gb home volume", "initial_size = '9gb'" in t)
+    check("fly.toml: 1gb home volume", "initial_size = '1gb'" in t)
     check("fly.toml: 1gb RAM", "memory = '1gb'" in t)
     check("fly.toml: private (no services/ports exposed)", "[[services]]" not in t and "[http_service]" not in t)
 
