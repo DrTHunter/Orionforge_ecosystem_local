@@ -235,6 +235,8 @@ class OrionEngine:
             "soul_script_sections": [
                 {"section": sp, "text": t, "score": round(s, 3)} for sp, t, s in retrieved
             ],
+            # Memory Vault recall — the same layer the web chat injects each turn.
+            "memories": self.recall_memories(agent, message or agent),
         }
 
     # ── Default personality ────────────────────────────────────────
@@ -309,6 +311,48 @@ class OrionEngine:
             return fm.search(query, top_k=k)
         except Exception as exc:
             return [{"error": f"memory search failed: {exc}"}]
+
+    def recall_memories(self, agent: str, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Vault memories relevant to ``query`` for ``agent``.
+
+        The web chat saves and recalls with ``scope=agent``; MCP project
+        summaries land in ``shared``, so search both. Failures return [] so a
+        broken vault never blocks a summon.
+        """
+        try:
+            return self._get_faiss_mem().search(query, scope=[agent, "shared"], top_k=k)
+        except Exception:
+            return []
+
+    def save_memory(
+        self,
+        text: str,
+        category: str = "other",
+        agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Save a memory the way the web chat's [MEMORY_SAVE] tag does: scoped to
+        the agent, so it is recalled in the app's chat and over MCP alike."""
+        text = (text or "").strip()
+        if not text:
+            return {"error": "memory text is required"}
+        scope = self.resolve_agent(agent) if agent else self.resolve_default_agent()
+        if not scope:
+            return {"error": f"Unknown agent '{agent}'. Available: {', '.join(self.list_agents())}"}
+        from src.memory.types import VALID_CATEGORIES
+        category = (category or "other").strip().lower()
+        if category not in VALID_CATEGORIES:
+            category = "other"
+        try:
+            mem = self._get_faiss_mem().add(
+                text=text,
+                scope=scope,
+                category=category,
+                source=f"mcp:{self.user}",
+                tags=["mcp"],
+            )
+            return {"ok": True, "id": mem.id, "agent": scope, "category": category, "stored": text[:120]}
+        except Exception as exc:
+            return {"error": f"save failed: {exc}"}
 
     def save_project_summary(
         self,

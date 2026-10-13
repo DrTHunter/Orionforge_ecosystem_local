@@ -60,6 +60,19 @@ def _format_persona(result: dict) -> str:
         for s in sections:
             label = s["section"] or "(section)"
             lines.append(f"\n**{label}**\n{s['text'].strip()}")
+    memories = [m for m in result.get("memories", []) if m.get("text")]
+    if memories:
+        lines += ["", "── MEMORY VAULT CONTEXT (memories relevant to this conversation) ──"]
+        for m in memories:
+            lines.append(f"\n- [{m.get('category', 'other')}] {m['text'].strip()}")
+    lines += [
+        "",
+        "── MEMORY SAVE PROTOCOL ──",
+        "You have a persistent memory vault shared with the OrionForge app. When the "
+        "user asks you to remember something, or you learn important biographical, "
+        "preference or project info worth keeping, call the `save_memory` tool "
+        f"(agent=\"{result['agent']}\") and confirm to the user what you saved.",
+    ]
     return "\n".join(lines)
 
 
@@ -117,6 +130,14 @@ def register_tools(server: "FastMCP", get_engine: "Callable[[], OrionEngine]") -
     def search_memory(query: str, k: int = 8) -> list:
         """Semantic search over the OrionForge unified Memory Vault."""
         return get_engine().search_memory(query, k=k)
+
+    @server.tool()
+    def save_memory(text: str, category: str = "other", agent: str = "") -> dict:
+        """Save a memory into the OrionForge Memory Vault, scoped to an agent (the
+        default personality if omitted) — the same place the app's chat saves, so
+        it is recalled there and here. Categories: bio, preference, project, goal,
+        health, plan, other, etc."""
+        return get_engine().save_memory(text, category=category, agent=agent or None)
 
     @server.tool()
     def save_project_summary(summary: str, title: str = "", tags: Optional[List[str]] = None) -> dict:
