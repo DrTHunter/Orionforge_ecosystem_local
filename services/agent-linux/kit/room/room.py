@@ -18,16 +18,35 @@ Decay keys off WALL TIME, not tick count. The Room ages when the world
 ages, not when you happen to write to it. An item in FAR untouched for
 DECAY_SECONDS is dropped. This is the whole point: scarcity that is real.
 """
-import json, os, sys, argparse, time, tempfile
+import json, os, sys, argparse, time, tempfile, contextlib
+try:
+    import fcntl
+except ImportError:  # not Linux: no lock available, single writer assumed
+    fcntl = None
 
 ROOM_DIR = os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.join(ROOM_DIR, "room.json")
+LOCK = os.path.join(ROOM_DIR, ".room.lock")
 CAP = {"held": 3, "near": 5}          # far is unbounded but decays
 DECAY_SECONDS = 6 * 3600              # FAR items untouched this long get dropped
 
 
 def _now():
     return time.time()
+
+
+@contextlib.contextmanager
+def locked():
+    """Hold the Room's lock for a whole load -> change -> save. Atomic writes stop a corrupted
+    file, not a lost one: without this, beat.py could save an older copy over a fresh put."""
+    with open(LOCK, "a") as fh:
+        if fcntl:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _load():
@@ -69,13 +88,18 @@ def _age_str(seconds):
 
 
 def _find(data, name):
-    """Return (zone, index, item) for the first item whose text matches name."""
-    n = name.lower()
-    for zone in ("held", "near", "far"):
-        for i, item in enumerate(data[zone]):
-            if n in item["text"].lower():
-                return zone, i, item
-    return None, None, None
+    """Return (zone, index, item) for the item named. An exact match wins; otherwise the text
+    must appear in exactly one item. Two partial matches is an error, never a guess."""
+    n = name.lower().strip()
+    every = [(z, i, it) for z in ("held", "near", "far") for i, it in enumerate(data[z])]
+    exact = [m for m in every if m[2]["text"].lower().strip() == n]
+    if exact:
+        return exact[0]
+    partial = [m for m in every if n in m[2]["text"].lower()]
+    if len(partial) > 1:
+        print("ambiguous: '%s' matches %s. Use more of the text." % (name, ", ".join(repr(m[2]["text"]) for m in partial)))
+        sys.exit(1)
+    return partial[0] if partial else (None, None, None)
 
 
 def render(data):
@@ -110,10 +134,10 @@ def render(data):
 
 def put(data, text, held=False):
     zone = "held" if held else "near"
-    z, _, _ = _find(data, text)
-    if z:
-        print("already here (%s): %s" % (z, text))
-        return
+    for z in ("held", "near", "far"):  # only an exact duplicate counts; "plan" may sit beside "plan B"
+        if any(it["text"].lower().strip() == text.lower().strip() for it in data[z]):
+            print("already here (%s): %s" % (z, text))
+            return
     if len(data[zone]) >= CAP[zone]:
         print("REFUSED. %s is full (%d/%d)." % (zone.upper(), len(data[zone]), CAP[zone]))
         print("Something has to go first. That is the point.")
@@ -181,17 +205,18 @@ def main():
     sub.add_parser("render")
     args = p.parse_args()
 
-    data = _load()
-    if args.cmd is None or args.cmd == "render":
-        print(render(data))
-    elif args.cmd == "put":
-        put(data, args.text, held=args.held)
-    elif args.cmd == "move":
-        move(data, args.text, args.zone)
-    elif args.cmd == "drop":
-        drop(data, args.text)
-    elif args.cmd == "decay":
-        decay(data)
+    with locked():
+        data = _load()
+        if args.cmd is None or args.cmd == "render":
+            print(render(data))
+        elif args.cmd == "put":
+            put(data, args.text, held=args.held)
+        elif args.cmd == "move":
+            move(data, args.text, args.zone)
+        elif args.cmd == "drop":
+            drop(data, args.text)
+        elif args.cmd == "decay":
+            decay(data)
 
 
 if __name__ == "__main__":

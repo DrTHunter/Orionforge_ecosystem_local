@@ -10,7 +10,7 @@
 set -u
 HB_DIR="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE="$HB_DIR/.daemon.pid"
-LOG="$HB_DIR/daemon.log"
+LOG="$HB_DIR/.daemon.log"   # check.sh reads the "up (pid N)" line as the daemon's signature
 INTERVAL="${INTERVAL:-60}"
 
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
@@ -18,8 +18,8 @@ if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; t
 fi
 
 echo $$ > "$PIDFILE"
-echo "$(date -u +%FT%TZ)  daemon up (pid $$)" >> "$LOG"
-trap 'echo "$(date -u +%FT%TZ)  daemon exit (pid $$)" >> "$LOG"' EXIT
+echo "$(date -u +%FT%TZ)  up (pid $$)" >> "$LOG"
+trap 'echo "$(date -u +%FT%TZ)  exit (pid $$)" >> "$LOG"' EXIT
 while true; do
   python3 "$HB_DIR/heartbeat.py" beat "auto-beat" --source daemon >/dev/null 2>&1
   date +%s > "$HB_DIR/.daemon.beat"

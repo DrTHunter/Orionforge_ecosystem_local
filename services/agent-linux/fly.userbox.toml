@@ -3,7 +3,7 @@
 # Created on its own network so the boxes are cut off from the rest of the organization:
 #   fly apps create orionforge-user-boxes --network orionforge-user-boxes
 # Build and push a new image (the engine reads the label from USER_BOX_IMAGE):
-#   fly deploy -c fly.userbox.toml --build-only --push --image-label userbox-v2
+#   fly deploy -c fly.userbox.toml --build-only --push --image-label userbox-v3
 # Existing boxes move onto the engine's current label the next time they start (Box.start).
 app = 'orionforge-user-boxes'
 primary_region = 'iad'

@@ -19,6 +19,7 @@ SLAB="${SLAB:-$DIR/slab.log}"
 INTERVAL="${INTERVAL:-900}"   # 15 min: quiet enough not to be noise, short enough to matter
 
 echo $$ > "$DIR/.witness.pid"
+echo "$(date -u +%FT%TZ)  up (pid $$)" >> "$DIR/.witness.log"
 trap 'echo "TOMBSTONE t=$(date -u +%s) pid=$$ reason=exit" >> "$SLAB"' EXIT
 seq=0
 while true; do

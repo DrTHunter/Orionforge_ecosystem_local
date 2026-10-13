@@ -4,6 +4,10 @@
 # or hand-written; the process table cannot. This never loops: a checker that can
 # die quietly is a second corpse. Silent on pass, so it composes with `&&`.
 #
+# A name match alone proves little when the name is `bash`: every shell script is bash. So
+# when the pidfile has a sibling log (.daemon.pid -> .daemon.log), the pid must also appear in
+# that log's own "up (pid N)" line: the process signed in under that pid when it started.
+#
 # Usage: check.sh <pidfile> <expected-name-substring> [max-age-seconds]
 # Exit:  0 ALIVE · 1 DEAD · 2 MISMATCH (alive but wrong process, or loop stalled) · 3 usage
 #
@@ -34,6 +38,12 @@ fi
 # Pids recycle: a live pid is not proof it is OUR process.
 if [[ "$COMM" != *"$EXPECT"* ]]; then
   echo "MISMATCH  $PIDFILE — pid $PID is '$COMM', not '*$EXPECT*' (recycled pid?)"
+  exit 2
+fi
+# Corroborate: a live bash with a recycled pid never signed this log.
+SIGLOG="${PIDFILE%.pid}.log"
+if [[ -f "$SIGLOG" ]] && ! grep -q "up (pid $PID)" "$SIGLOG"; then
+  echo "MISMATCH  $PIDFILE — pid $PID is a live '$COMM' but never signed $SIGLOG: a stranger wearing the pid"
   exit 2
 fi
 # Alive but not beating is a zombie in spirit (only if the pidfile has a sibling .beat stamp).

@@ -4,6 +4,7 @@
 # Start detached:  setsid nohup bash ~/kit/room/beat_loop.sh >/dev/null 2>&1 &
 cd "$(dirname "$0")" || exit 1
 echo $$ > .beat_loop.pid
+echo "$(date -u +%FT%TZ)  up (pid $$)" >> .beat_loop.log
 while true; do
   python3 beat.py >> beat.log 2>&1
   date +%s > .beat_loop.beat

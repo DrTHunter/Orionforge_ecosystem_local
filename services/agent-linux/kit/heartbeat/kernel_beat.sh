@@ -15,6 +15,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 INT="${1:-5}"
 OUT="$DIR/kernel-beats.jsonl"
 echo "$$" > "$DIR/.kernel.pid"
+echo "$(date -u +%FT%TZ)  up (pid $$)" >> "$DIR/.kernel.log"
 
 beat() {
   local line

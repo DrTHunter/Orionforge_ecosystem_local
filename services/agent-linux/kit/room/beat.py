@@ -24,12 +24,13 @@ def _room_module():
 def main():
     try:
         room = _room_module()
-        d = room._load()
-        if not all(z in d for z in ("held", "near", "far")):
-            raise ValueError("room.json is not the held/near/far schema. Refusing.")
-        dropped = room.decay_items(d)
-        d["last_beat"] = time.time()
-        room._save(d)  # atomic; bumps the display tick
+        with room.locked():  # the same lock room.py holds, so a beat never saves over a put
+            d = room._load()
+            if not all(z in d for z in ("held", "near", "far")):
+                raise ValueError("room.json is not the held/near/far schema. Refusing.")
+            dropped = room.decay_items(d)
+            d["last_beat"] = time.time()
+            room._save(d)  # atomic; bumps the display tick
         for text in dropped:
             print(f"decayed: {text}")
         print(f"beat ok: tick={d['tick']} last_beat={d['last_beat']:.0f}")

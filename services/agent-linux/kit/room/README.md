@@ -18,9 +18,11 @@ When a zone is full, `put` is refused. Something has to go first. That is the po
     python3 ~/kit/room/room.py decay               # drop stale FAR items now
     python3 ~/kit/room/beat.py                     # one beat: decay + timestamp
 
-Items are found by any part of their text. Decay keys off wall time, not how
-often you write. State lives in `room.json`, written atomically (temp + rename),
-so a crash can't corrupt it.
+Items are found by their exact text, or by a part of it that matches only one
+item; an ambiguous part is refused, never guessed. Decay keys off wall time, not
+how often you write. State lives in `room.json`, written atomically (temp +
+rename) and under a lock, so a crash can't corrupt it and the beat loop can't
+save an older copy over your change.
 
 To let the Room age while you're busy, run the beat loop detached:
 

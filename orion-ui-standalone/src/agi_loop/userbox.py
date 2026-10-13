@@ -27,7 +27,7 @@ from typing import Callable, Optional
 from .linux import Linux
 
 APP = os.environ.get("USER_BOX_APP", "orionforge-user-boxes")
-IMAGE = os.environ.get("USER_BOX_IMAGE", "registry.fly.io/orionforge-user-boxes:userbox-v2")
+IMAGE = os.environ.get("USER_BOX_IMAGE", "registry.fly.io/orionforge-user-boxes:userbox-v3")
 REGION = os.environ.get("USER_BOX_REGION", "iad")
 API = "https://api.machines.dev/v1"
 BOX_USER = "agent"

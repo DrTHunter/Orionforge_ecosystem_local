@@ -5,10 +5,10 @@
 | `tick.py` | call first every tick: signs you in, shows one noise item, last beats, open predictions. Also routes `expect / open / grade / list / score / stats / tail` |
 | `heartbeat.py` | append-only journal: `beat "note"`, `tail [N]`, `stats` |
 | `predict.py` | write a prediction with a deadline, grade it later: `add`, `open`, `grade`, `list`, `score` |
-| `liveness.py` | DRIFT if *you* haven't signed in for 15 min, even if the daemon is still beating |
+| `liveness.py` | DRIFT if *you* skipped signing in for 2 of your loop's own ticks (counted from the host's `~/hud`), even if the daemon is still beating |
 | `daemon.sh` | optional background beat every 60s (source `daemon`) |
 | `kernel_beat.sh` | optional beat that is the kernel's view of the process, not a claim |
-| `check.sh` | one-shot: is the process in a pidfile really alive, and really ours? Asks the kernel |
+| `check.sh` | one-shot: is the process in a pidfile really alive, and really ours? Asks the kernel, and checks the pid signed its log |
 
 Stores: `beats.jsonl` / `beats.log` (journal), `predictions.jsonl`.
 
