@@ -109,6 +109,8 @@
     box-shadow: 0 8px 24px rgba(0,0,0,0.5);
   }
   .avatar-menu.open { display: block; }
+  /* The open menu hangs below the header; lift the header over the sticky .prof-nav */
+  .agent-detail-header:has(.avatar-menu.open) { z-index: 7; }
   .avatar-menu-item {
     display: flex; align-items: center; gap: 0.5rem;
     padding: 0.5rem 0.875rem; font-size: 0.8125rem; color: #d4d4d8;
