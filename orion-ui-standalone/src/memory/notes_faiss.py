@@ -102,9 +102,17 @@ class NotesFAISS:
             return 0
 
         texts = [c["text"] for c in chunks]
-        vecs = self.encoder.encode(texts, normalize_embeddings=True,
-                                   show_progress_bar=True, batch_size=32)
-        vecs = np.ascontiguousarray(vecs, dtype="float32")
+        # Reuse vectors already on disk for unchanged text, so saving one
+        # soul script embeds its own chunks instead of every agent's.
+        cached = self._cached_vectors()
+        missing = list(dict.fromkeys(t for t in texts if t not in cached))
+        if missing:
+            new = self.encoder.encode(missing, normalize_embeddings=True,
+                                      show_progress_bar=False, batch_size=32)
+            cached.update(zip(missing, np.asarray(new, dtype="float32")))
+        vecs = np.ascontiguousarray(np.stack([cached[t] for t in texts]), dtype="float32")
+        log.info("[notes_faiss] Embedded %d new chunks, reused %d",
+                 len(missing), len(texts) - len(missing))
 
         dim = vecs.shape[1]
         self.index = faiss.IndexFlatIP(dim)
@@ -113,6 +121,28 @@ class NotesFAISS:
         self._save()
         log.info("[notes_faiss] Indexed %d chunks (%d dims)", len(chunks), dim)
         return len(chunks)
+
+    def _cached_vectors(self) -> Dict[str, np.ndarray]:
+        """Map chunk text to its vector in the index on disk, if one was built
+        with this model. Anything unreadable just means a full re-embed."""
+        idx_path = self.faiss_dir / _INDEX_FILE
+        meta_path = self.faiss_dir / _META_FILE
+        if not idx_path.exists() or not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("model_name") != self.model_name:
+                return {}
+            old = faiss.read_index(str(idx_path))
+            old_chunks = data.get("chunks", [])
+            if old.ntotal != len(old_chunks) or old.d != self.embedding_dim:
+                return {}
+            vecs = old.reconstruct_n(0, old.ntotal)
+            return {c.get("text", ""): v for c, v in zip(old_chunks, vecs)}
+        except Exception as exc:
+            log.warning("[notes_faiss] Couldn't reuse cached vectors: %s", exc)
+            return {}
 
     # ------------------------------------------------------------------
     # Search
