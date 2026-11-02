@@ -555,7 +555,7 @@ async function send(text) {
 // ---------- wiring ----------
 $('form').addEventListener('submit', e => { e.preventDefault(); send($('input').value); });
 $('input').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send($('input').value); }
+    if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); send($('input').value); }
 });
 $('input').addEventListener('input', () => {
     const el = $('input'); el.style.height = ''; el.style.height = Math.min(el.scrollHeight, 140) + 'px';

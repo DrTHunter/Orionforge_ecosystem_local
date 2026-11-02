@@ -336,7 +336,7 @@
         <div id="convo-files" style="display:none;gap:.4rem;flex-wrap:wrap;margin-top:.6rem"></div>
         <div style="display:flex;gap:.5rem;margin-top:.75rem">
           <button class="al-btn" id="convo-attach" type="button" title="Attach documents — text, soul scripts, a whole project as .zip. Long pasted text becomes a .txt automatically.">&#128206;</button>
-          <textarea class="al-input" id="convo-input" rows="1" style="resize:vertical;max-height:40vh" placeholder="Leave a message at the door… (Shift+Enter for a new line; paste as much as you like)" maxlength="100000" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea>
+          <textarea class="al-input" id="convo-input" rows="1" style="resize:vertical;max-height:40vh" placeholder="Leave a message at the door… (Shift+Enter for a new line; paste as much as you like)" maxlength="100000" onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!matchMedia('(pointer: coarse)').matches){event.preventDefault();sendMessage();}"></textarea>
           <button class="al-btn b-acc" onclick="sendMessage()">Send</button>
         </div>
       </div>

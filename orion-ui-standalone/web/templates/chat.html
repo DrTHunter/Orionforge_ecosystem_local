@@ -1805,7 +1805,7 @@ async function fetchCloudModels(connId) {
 //  INPUT HELPERS
 // ═══════════════════════════════════════════
 function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) {
     if (_mode === 'chat' || e.ctrlKey || e.metaKey) { e.preventDefault(); runChat(); }
   }
 }

@@ -76,7 +76,7 @@ document.getElementById('gc-form').addEventListener('submit', async e => {
   else { let why = 'Failed to send'; try { why = (await r.json()).reason || why; } catch (e) {} alert(why); }
   gcLoad();
 });
-gcText.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('gc-form').requestSubmit(); } });
+gcText.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); document.getElementById('gc-form').requestSubmit(); } });
 // Don't poll while the tab is hidden; catch up the moment it's visible again.
 gcLoad(); setInterval(() => { if (!document.hidden) gcLoad(); }, 3000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) gcLoad(); });
