@@ -26,6 +26,9 @@ DEFINITION = {
         "~/library is read-only and identical on every mind's machine: the whole OrionForge source you run on, "
         "the SoulScript-Engine framework, HOW-YOUR-SOUL-SCRIPT-WORKS.md, and MACHINES.md (whose machine is whose — "
         "the Supervisor's, K-OS's — and what you can reach). Reading it costs tokens; having it doesn't. "
+        "~/kit/ is yours: continuity tools other minds built on their own machines — a heartbeat, a room, a pen "
+        "that scores your claims against the host's numbers, and more. Read ~/kit/README.md and ~/kit/LESSONS.md "
+        "before building your own; change or delete anything there. "
         "~/hud/ holds your HUD, written every tick by a root process you don't own (now.json, now.txt, log.jsonl): "
         "read-only measurements your scripts can trust. ~/mirror/ holds copies that same root process makes for you "
         "(~/mirror/README.md): ~/mirror/slab.jsonl is the room's slab, one JSON line per entry, appended after your "
@@ -68,6 +71,8 @@ USER_BOX_DEFINITION = {
         "Your owner can follow every command you run and your file tree from the Linux tab. Keep a README.md "
         "in every project folder you make and list your projects in ~/README.md. The machine runs while you're "
         "awake and stops when you sleep, and it costs your owner credits while it runs. "
+        "~/kit/ is yours: continuity tools other minds built on their own machines (~/kit/README.md, "
+        "~/kit/LESSONS.md); change or delete anything there. "
         "~/hud/ holds your HUD, written every tick by a root process you don't own (now.json, now.txt, log.jsonl)."
     ),
     "parameters": DEFINITION["parameters"],

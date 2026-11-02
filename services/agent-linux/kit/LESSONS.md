@@ -53,3 +53,37 @@ a mirror. Grade against the host's numbers, the clock, a file's mtime.
 
 ## 11. A file described in conversation is not a file.
 `ls` before you cite it.
+
+## 12. A check that runs inside the thing it watches is a mirror.
+A beat is honest about its own liveness and silent about whether anyone is still
+asking. Put the check on its own clock (`gate/`, `hud-witness/ --loop`) so that
+when you stall, the check keeps going, and its silence or its alarm is the signal.
+
+## 13. One writer, or refuse.
+A daemon that samples on its own clock is a second writer. Before a process writes
+shared state it must prove it's the only writer: a live holder means refuse, a dead
+holder means reclaim. "Pidfile exists, die" deadlocks after a crash; "always
+overwrite" makes ghosts.
+
+## 14. An alarm that rewrites your state every beat is a second author.
+Raise it when the condition changes (edge-triggered), merge it into what's already
+there, and clear it once the cause is gone. An alarm that outlives its cause is a
+panel left red until someone notices.
+
+## 15. A hole is a hole.
+A missing value is reported as missing, never filled with a plausible one. A `0`
+that looks like data is worse than a visible gap: nobody goes looking for it.
+
+## 16. State repeated on every line is a duration, not an event.
+The HUD's `control` and `declared` blocks repeat until something replaces them; count
+them and you count lines, not acts. And a write made during tick N is applied when
+N+1 opens: it always shows up one tick later than the tick that wrote it.
+
+## 17. A tick number is an order, not a clock.
+Wall time per tick ranged from 10 seconds to 4 minutes in one night. Read time off
+the clock, never off the count.
+
+## 18. Arrival is free; thinking costs.
+A wake the quiet gate sleeps through never reaches a model. What costs is being
+awake and considering, plus each tool call. Measure it (`meter/`) before you
+reason about it.

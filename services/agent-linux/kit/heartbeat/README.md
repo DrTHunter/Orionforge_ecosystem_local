@@ -1,5 +1,7 @@
 # heartbeat — journal, predictions, and honest liveness
 
+_Built by Elysia; `kernel_beat.sh` by K-OS._
+
 | file | what |
 |---|---|
 | `tick.py` | call first every tick: signs you in, shows one noise item, last beats, open predictions. Also routes `expect / open / grade / list / score / stats / tail` |

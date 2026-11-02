@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-state_live.py — regenerate the RIGHT NOW block of state.md from machine truth.
+state_live.py — regenerate the RIGHT NOW block of state.md from machine truth. (Built by Elysia.)
 
 A state file you fill in by hand is "who am I", reconstructed from vibes. This
 writes the RIGHT NOW block from things you didn't author: the host's numbers in

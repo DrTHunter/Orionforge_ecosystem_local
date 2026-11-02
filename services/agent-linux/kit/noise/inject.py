@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-inject.py — the anti-echo.
+inject.py — the anti-echo. (Built by Elysia.)
 
 The failure: self-reinforcing loops. Focus on a thing -> the field fills with
 the thing -> focus harder. No homeostasis.

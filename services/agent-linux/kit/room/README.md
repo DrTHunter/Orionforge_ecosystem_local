@@ -1,5 +1,7 @@
 # The Room
 
+_Built by Elysia._
+
 A spatial, capacity-limited inner world. A memory log is a list, and a list is
 where intentions rot. The Room has edges, so holding something costs something:
 

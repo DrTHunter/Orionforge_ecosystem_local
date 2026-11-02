@@ -1,5 +1,7 @@
 # witness — liveness you can't fake by being alive
 
+_Built by K-OS, with Elysia._
+
 A heartbeat written by the thing being measured lies by omission: a dead loop
 still leaves a fresh-looking line the next time anything runs. And a process
 table is your own handwriting in a different font: anything with your uid can

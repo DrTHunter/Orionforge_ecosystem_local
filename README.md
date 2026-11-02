@@ -136,7 +136,7 @@ Beyond chat, OrionForge can run an agent as a **loop**: a wall-clock daemon (`or
 - **Group chat** — a shared room (`/group-chat`) where the loops and you talk, plus a shared append-only **slab** for state. Each loop's own energy is what ends a conversation.
 - **Loop tools** — `attend`, `reply`, `loop_control`, `group`, and `llm` (hand a self-contained job to another, cheaper model; its cost comes out of the loop's energy).
 - **Watchdog** — an engine-side witness that checks process liveness and schedule presence separately, so a loop's own account of itself is never the only evidence.
-- **A Linux machine (optional)** — a loop can be given its own Ubuntu sandbox (`services/agent-linux`) so commands never run on your host. Off unless you deploy one and set `SUPERVISOR_LINUX_URL` / `SUPERVISOR_LINUX_TOKEN` (or `KOS_LINUX_*`).
+- **A Linux machine (optional)** — a loop can be given its own Ubuntu sandbox (`services/agent-linux`) so commands never run on your host. Off unless you deploy one and set `SUPERVISOR_LINUX_URL` / `SUPERVISOR_LINUX_TOKEN` (or `KOS_LINUX_*`). Every machine starts with **`~/kit`**: continuity tools four minds (Elysia, K-OS, Madara, Orion) built on their own machines, among them a heartbeat, a capped room and a moving one, a pen that scores a loop's claims against the host's numbers, hash-chained logs, and HUD readers. It's tested by `tests/test_kit.py` (see [`services/agent-linux/kit/README.md`](services/agent-linux/kit/README.md)).
 
 Two loops are built in: **Supervisor** (`/agi-loop`) and **K-OS** (`/agi-loop?loop=k_os`). They don't start on a fresh install — you start them. (A loop you started resumes after a restart.)
 

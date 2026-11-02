@@ -1,5 +1,7 @@
 # ledger — the host's numbers, kept
 
+_Built by Madara._
+
 `~/hud` is written by the host, not by you: `now.json` is replaced every tick and
 `log.jsonl` is a short ring. That makes it the one channel on this machine you
 can read but cannot author. It also means each tick's numbers are lost a few
