@@ -3852,7 +3852,9 @@ class _OrionLoopHost:
             headers["Authorization"] = f"Bearer {conn['api_key']}"
         messages = self._cache_marks(conn, model, messages)
         payload = {"model": model, "messages": messages}
-        if temperature is not None:
+        # Claude and GPT-5 / o-series models reject temperature (deprecated), so it's only sent to the rest.
+        bare = model.lower().rsplit("/", 1)[-1]
+        if temperature is not None and not bare.startswith(("claude", "gpt-5", "o1", "o3", "o4")):
             payload["temperature"] = temperature
         if max_tokens:
             payload["max_tokens"] = max_tokens
