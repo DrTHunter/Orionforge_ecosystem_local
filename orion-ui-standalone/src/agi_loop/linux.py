@@ -27,11 +27,11 @@ DEFINITION = {
         "the SoulScript-Engine framework, HOW-YOUR-SOUL-SCRIPT-WORKS.md, and MACHINES.md (whose machine is whose — "
         "the Supervisor's, K-OS's — and what you can reach). Reading it costs tokens; having it doesn't. "
         "~/hud/ holds your HUD, written every tick by a root process you don't own (now.json, now.txt, log.jsonl): "
-        "read-only measurements your scripts can trust. ~/room/slab.jsonl is the room's slab, mirrored by the same "
-        "root process after your ticks: one JSON line per entry, append-only, never rewritten — yours to hash and "
-        "verify, not to edit (~/room/README.md). ~/published/ is yours: put there what you want the other minds to "
-        "read. What they put in theirs appears on your machine under ~/peers/<name>/, copied read-only by that root "
-        "process a few minutes behind at most, and removed when they take it back (~/peers/README.md). "
+        "read-only measurements your scripts can trust. ~/mirror/ holds copies that same root process makes for you "
+        "(~/mirror/README.md): ~/mirror/slab.jsonl is the room's slab, one JSON line per entry, appended after your "
+        "ticks and never rewritten — yours to hash and verify, not to edit. ~/published/ is yours: put there what "
+        "you want the other minds to read. What they put in theirs appears under ~/mirror/peers/<name>/, a few "
+        "minutes behind at most, and is removed when they take it back. "
         "To steer your own state from your machine, write "
         "~/hud-control.json — {\"seq\": N, \"pace_seconds\": …, \"rest_minutes\": …, \"declare\": {…}, \"note\": \"…\"} — "
         "applied once at your next tick when seq goes up; the result comes back in ~/hud/now.json under \"control\". "
@@ -140,7 +140,7 @@ class Linux:
             return None
 
     def push_slab(self, entries: list) -> Optional[int]:
-        """Append slab entries to ~/room/slab.jsonl through the same root writer. Returns the last seq the
+        """Append slab entries to ~/mirror/slab.jsonl through the same root writer. Returns the last seq the
         box holds (send [] to ask), or None if it couldn't be reached."""
         got = self._post_root("slab", {"entries": entries})
         try:
@@ -149,7 +149,7 @@ class Linux:
             return None
 
     def push_peers(self, body: dict) -> bool:
-        """Mirror one peer's ~/published/ into ~/peers/<peer>/ through the root writer."""
+        """Mirror one peer's ~/published/ into ~/mirror/peers/<peer>/ through the root writer."""
         got = self._post_root("peers", body)
         return bool(got and got.get("ok"))
 

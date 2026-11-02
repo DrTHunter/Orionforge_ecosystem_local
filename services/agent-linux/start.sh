@@ -19,9 +19,12 @@ if [ -d "$KIT_SRC" ] && [ ! -f "$HOME_DIR/.agent/kit-seeded" ]; then
     [ -e "$HOME_DIR/kit" ] || cp -a "$KIT_SRC" "$HOME_DIR/kit"
     touch "$HOME_DIR/.agent/kit-seeded"
 fi
-# Everything in the home is the mind's — except ~/library (read-only reference), ~/hud, ~/room and ~/peers
-# (measurements and mirrors, written by root, below). Those stay root-owned across reboots.
-find "$HOME_DIR" \( -path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" -o -path "$HOME_DIR/room" -o -path "$HOME_DIR/peers" \) -prune -o -exec chown -h "$AGENT_USER:$AGENT_USER" {} +
+# Everything in the home is the mind's — except ~/library (read-only reference), ~/hud and a ~/mirror the
+# host made (measurements and copies, written by root, below). Those stay root-owned across reboots.
+# A ~/mirror without the host's mark is the mind's own folder, and is handed back like the rest.
+MIRROR_PRUNE=()
+[ -f "$HOME_DIR/mirror/.host-mirror" ] && MIRROR_PRUNE=(-o -path "$HOME_DIR/mirror")
+find "$HOME_DIR" \( -path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" "${MIRROR_PRUNE[@]}" \) -prune -o -exec chown -h "$AGENT_USER:$AGENT_USER" {} +
 mkdir -p "$HOME_DIR/published" && chown "$AGENT_USER:$AGENT_USER" "$HOME_DIR/published"
 
 # The HUD writer: same server, HUD_ONLY mode, as root on :8081. It serves only POST /hud and /health —

@@ -12356,8 +12356,8 @@ def test_agi_loop_hud_on_linux_and_local_day():
         check("a wrong token makes push_hud return False, not raise", Linux(f"http://127.0.0.1:{port}", "bad", "t").push_hud(payload) is False)
         check("an unreachable box returns False, quickly", Linux("http://127.0.0.1:9", "x", "t").push_hud(payload) is False)
 
-        # ~/room/slab.jsonl — the slab mirror, append-only, written by the same root writer
-        room = Path(home) / "room"
+        # ~/mirror/slab.jsonl — the slab mirror, append-only, written by the same root writer
+        room = Path(home) / "mirror"
         check("asking an empty mirror what it holds → 0", linux.push_slab([]) == 0)
         e = lambda n, t="x": {"seq": n, "ts": "2026-11-01T00:00:00+00:00", "author": "k_os", "loop": "k_os", "tick": n, "text": t}
         check("entries append, and the box says the last seq it holds", linux.push_slab([e(1, "the seam ✶"), e(2)]) == 2)
@@ -12373,23 +12373,24 @@ def test_agi_loop_hud_on_linux_and_local_day():
               post("/slab", {"entries": [e(7), {"seq": "8"}]})[0] == 400 and S._last_seq(room / "slab.jsonl") == 6)
         check("not a list of objects → 400", post("/slab", {"entries": "x"})[0] == 400)
         check("no token → 401", post("/slab", {"entries": []}, token="wrong")[0] == 401)
-        check("~/room/README.md says what it is and that it's append-only",
+        check("~/mirror/README.md says what it is and that the slab is append-only",
               "only ever appends" in (room / "README.md").read_text(encoding="utf-8"))
+        check("…and the host marks the folder as its own", (room / ".host-mirror").is_file())
         check("a mirror that can't be reached says None, not raises", Linux("http://127.0.0.1:9", "x", "t").push_slab([]) is None)
 
-        # ~/peers/<name>/ — another mind's ~/published/, copied by the root writer
-        peers = Path(home) / "peers"
+        # ~/mirror/peers/<name>/ — another mind's ~/published/, copied by the root writer
+        peers = Path(home) / "mirror" / "peers"
         ok = linux.push_peers({"peer": "k_os", "files": [{"path": "notes.md", "content": "K's ✶ notes", "mtime": 1_700_000_000},
                                                          {"path": "deep/spine.txt", "content": "spine"}],
                                "keep": ["notes.md", "deep/spine.txt"], "skipped": ["photo.png: binary file"]})
-        check("a peer's published files land under ~/peers/<name>/", ok and (peers / "k_os" / "notes.md").read_text(encoding="utf-8")
+        check("a peer's published files land under ~/mirror/peers/<name>/", ok and (peers / "k_os" / "notes.md").read_text(encoding="utf-8")
               == "K's ✶ notes" and (peers / "k_os" / "deep" / "spine.txt").read_text(encoding="utf-8") == "spine")
         check("…keeping the modification time they had on their machine", int((peers / "k_os" / "notes.md").stat().st_mtime) == 1_700_000_000)
         synced = json.loads((peers / "k_os" / ".synced.json").read_text(encoding="utf-8"))
         check("…with a note of when, and what wasn't copied", synced["files"] == 2 and synced["not_copied"] == ["photo.png: binary file"]
               and synced["synced_at"].endswith("Z"))
-        check("~/peers/README.md says only what they published shows up", "Only what a mind put in its own ~/published/"
-              in (peers / "README.md").read_text(encoding="utf-8"))
+        check("~/mirror/README.md says only what they published shows up", "own ~/published/ shows up here"
+              in (room / "README.md").read_text(encoding="utf-8"))
         linux.push_peers({"peer": "k_os", "files": [], "keep": ["notes.md"]})
         check("a file they take back is removed here too, and its empty folder", (peers / "k_os" / "notes.md").exists()
               and not (peers / "k_os" / "deep").exists())
@@ -12402,6 +12403,22 @@ def test_agi_loop_hud_on_linux_and_local_day():
             check(f"/peers refuses {why} → 400, nothing touched", post("/peers", bad)[0] == 400
                   and (peers / "k_os" / "notes.md").exists() and not (Path(home) / ".bashrc").exists())
         check("/peers needs the token", post("/peers", {"peer": "k_os", "files": [], "keep": []}, token="wrong")[0] == 401)
+        # a folder of the mind's own is never taken over (a mind may keep a ~/room project of its own)
+        theirs = Path(home) / "mirror.host"
+        room.rename(theirs)
+        mine = Path(home) / "mirror"
+        mine.mkdir()
+        (mine / "README.md").write_text("my own notes", encoding="utf-8")
+        check("a ~/mirror the host didn't make is the mind's: /slab → 409, nothing written",
+              post("/slab", {"entries": [e(10)]})[0] == 409 and [x.name for x in mine.iterdir()] == ["README.md"]
+              and (mine / "README.md").read_text(encoding="utf-8") == "my own notes")
+        check("…/peers too", post("/peers", {"peer": "k_os", "files": [{"path": "a.md", "content": "x"}],
+                                             "keep": ["a.md"]})[0] == 409 and [x.name for x in mine.iterdir()] == ["README.md"])
+        check("…and the engine just hears None", linux.push_slab([]) is None
+              and linux.push_peers({"peer": "k_os", "files": [], "keep": []}) is False)
+        shutil.rmtree(mine)
+        theirs.rename(room)
+        check("nothing is ever written to ~/room (that name is the mind's)", not (Path(home) / "room").exists())
         S.HUD_ONLY = False
         check("the mind's own command server refuses /peers", post("/peers", {"peer": "k_os", "files": [], "keep": []})[0] == 404
               and (peers / "k_os" / "notes.md").exists())
@@ -12582,8 +12599,8 @@ def test_agi_loop_hud_on_linux_and_local_day():
         ubme.linux, ubme.group = OwnBox(headers={"fly-force-instance-id": "x"}), Room2()
         ubme._push_box({"tick": 1})
         check("a user's own box doesn't mirror peers yet", ubme.linux.sent == [])
-        check("each mind is told about ~/published and ~/peers", "~/published/ is yours" in DEFINITION["description"]
-              and "~/peers/<name>/" in DEFINITION["description"])
+        check("each mind is told about ~/published and ~/mirror/peers", "~/published/ is yours" in DEFINITION["description"]
+              and "~/mirror/peers/<name>/" in DEFINITION["description"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     check("each mind is told about ~/hud and who writes it", "~/hud/ holds your HUD, written every tick by a root process you don't own"
@@ -12729,11 +12746,13 @@ def test_agi_loop_hud_on_linux_and_local_day():
     start = (srv / "start.sh").read_text(encoding="utf-8")
     check("boot starts the root HUD writer on :8081", "HUD_ONLY=1 PORT=8081" in start
           and "python3 /opt/agent/shell_server.py &" in start)
-    check("boot never hands ~/library, ~/hud, ~/room or ~/peers back to the mind",
-          '-path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" -o -path "$HOME_DIR/room" -o -path "$HOME_DIR/peers"' in start
+    check("boot never hands ~/library, ~/hud or the host's ~/mirror back to the mind",
+          '-path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" "${MIRROR_PRUNE[@]}"' in start
           and "-prune" in start and "chown -R" not in start)
+    check("…but a ~/mirror without the host's mark is the mind's, and stays theirs",
+          '[ -f "$HOME_DIR/mirror/.host-mirror" ] && MIRROR_PRUNE=(-o -path "$HOME_DIR/mirror")' in start)
     check("…and gives every mind a ~/published/ of its own", 'mkdir -p "$HOME_DIR/published"' in start)
-    check("each mind is told about the slab mirror on its machine", "~/room/slab.jsonl" in DEFINITION["description"])
+    check("each mind is told about the slab mirror on its machine", "~/mirror/slab.jsonl" in DEFINITION["description"])
     check("the mind's own server runs without HUD_ONLY", "env -u HUD_ONLY" in start and "PORT=8080" in start)
     check("the image exposes the HUD writer's port", "EXPOSE 8080 8081 7681" in (srv / "Dockerfile").read_text(encoding="utf-8"))
 

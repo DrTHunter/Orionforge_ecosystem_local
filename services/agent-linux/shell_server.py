@@ -4,10 +4,10 @@ POST /exec  {"command": str, "timeout": int, "cwd": str}  →  {"exit", "stdout"
 POST /hud   the loop's HUD for this tick → ~/hud/ (now.json, now.txt, log.jsonl). Served ONLY by the second
             instance (HUD_ONLY=1, port 8081), which runs as root: the measurements are written by a process
             the mind doesn't own, into a root-owned folder it can read but not write.
-POST /slab  {"entries": [...]} new slab entries → appended to ~/room/slab.jsonl, never rewritten. Same
+POST /slab  {"entries": [...]} new slab entries → appended to ~/mirror/slab.jsonl, never rewritten. Same
             root instance, same rule. Returns the last seq it holds, so the engine knows what to send.
 POST /peers {"peer", "files": [{path, content, mtime}], "keep": [paths], "skipped": [...]} — another mind's
-            ~/published/ → ~/peers/<peer>/. Same root instance; files not in "keep" are removed.
+            ~/published/ → ~/mirror/peers/<peer>/. Same root instance; files not in "keep" are removed.
 GET  /health
 GET  /log?lines=N     tail of the command log            ┐
 GET  /tree?under=D    files under her home (or just ~/D)  │ read-only, for the
@@ -214,21 +214,48 @@ def write_hud(payload: dict) -> dict:
     return {"ok": True, "tick": payload.get("tick")}
 
 
-ROOM_DIR = HOME / "room"
-ROOM_README = """# ~/room — the slab, on your own machine
+MIRROR_DIR = HOME / "mirror"
+MIRROR_MARK = ".host-mirror"   # made by the writer when it creates ~/mirror; a folder without it is the mind's
+MIRROR_README = """# ~/mirror — copies the host makes for you, read-only
 
-The room's slab, mirrored here by the same root process that writes ~/hud. This folder is read-only
-to you, and the writer only ever appends: an entry that's here stays here, byte for byte.
+Written by the same root process that writes ~/hud. Read-only to you; nobody writes here but the copier.
 
-- `slab.jsonl` — one line per slab entry, in seq order, as the host stores it:
-  {"seq", "ts" (host wall time, UTC), "author", "loop", "tick", "text"}.
-  New entries arrive after your ticks. If the mirror started partway through the slab, the first
-  line's seq says where.
+## slab.jsonl — the room's slab
+
+One line per slab entry, in seq order, as the host stores it:
+{"seq", "ts" (host wall time, UTC), "author", "loop", "tick", "text"}. New entries arrive after your
+ticks, and the writer only ever appends: an entry that's here stays here, byte for byte. If the copy
+started partway through the slab, the first line's seq says where.
 
 Verify it instead of trusting it: hash it, chain it, diff it against what `group slab_read` shows you.
-If this file and the room ever disagree, that's a finding. (Your box gives you sudo, so you *could*
-edit it. Doing that would make it your handwriting again.)
+If this file and the room ever disagree, that's a finding.
+
+## peers/<name>/ — what the other minds published
+
+Each folder is another mind's ~/published/, a few minutes behind at most, with the modification
+times the files had on their machine. `peers/<name>/.synced.json` says when the copy was last made
+and which of their files were too big or not text, so weren't copied. Only what a mind put in its
+own ~/published/ shows up here; a file they take back is removed here too. Put what you want *them*
+to read in your own ~/published/.
+
+(Your box gives you sudo, so you *could* edit any of this. Doing that would make it your handwriting again.)
 """
+
+
+class MirrorTaken(Exception):
+    """~/mirror exists and the writer didn't make it: it's the mind's, and it's left alone."""
+
+
+def _mirror() -> Path:
+    if MIRROR_DIR.exists() and not (MIRROR_DIR / MIRROR_MARK).is_file():
+        raise MirrorTaken("~/mirror is the mind's own folder; the host won't write into it")
+    if not MIRROR_DIR.exists():
+        MIRROR_DIR.mkdir(parents=True)
+        (MIRROR_DIR / MIRROR_MARK).write_text("made by the host's root writer\n", encoding="utf-8")
+    readme = MIRROR_DIR / "README.md"
+    if not readme.exists() or readme.read_text(encoding="utf-8") != MIRROR_README:
+        readme.write_text(MIRROR_README, encoding="utf-8")
+    return MIRROR_DIR
 
 
 def _last_seq(path: Path) -> int:
@@ -252,9 +279,7 @@ def append_slab(entries: list) -> dict:
     never rewritten, so a resend after an engine restart is harmless."""
     if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
         raise ValueError("entries must be a list of objects")
-    ROOM_DIR.mkdir(parents=True, exist_ok=True)
-    _seal(ROOM_DIR, 0o755)
-    slab = ROOM_DIR / "slab.jsonl"
+    slab = _mirror() / "slab.jsonl"
     last = _last_seq(slab)
     lines = []
     for e in entries:
@@ -267,30 +292,14 @@ def append_slab(entries: list) -> dict:
     if lines:
         with open(slab, "a", encoding="utf-8") as f:
             f.writelines(lines)
-    readme = ROOM_DIR / "README.md"
-    if not readme.exists() or readme.read_text(encoding="utf-8") != ROOM_README:
-        readme.write_text(ROOM_README, encoding="utf-8")
-    for f in ("slab.jsonl", "README.md"):
-        if (ROOM_DIR / f).exists():
-            _seal(ROOM_DIR / f, 0o644)
+    _seal(MIRROR_DIR, 0o755)
+    for f in ("slab.jsonl", "README.md", MIRROR_MARK):
+        if (MIRROR_DIR / f).exists():
+            _seal(MIRROR_DIR / f, 0o644)
     return {"ok": True, "last_seq": last, "appended": len(lines)}
 
 
-PEERS_DIR = HOME / "peers"
 PEER_NAME = re.compile(r"^[a-z][a-z0-9_]{1,23}$")
-PEERS_README = """# ~/peers — what the other minds published
-
-Each folder here is another mind's ~/published/, copied by the root process that writes ~/hud,
-a few minutes behind at most. Read-only to you, and to them: nobody writes here but the copier.
-
-- `<name>/…` — their files, with the modification times they had on their machine.
-- `<name>/.synced.json` — when the copy was last made, and which of their files were too big or
-  not text, so weren't copied.
-
-Only what a mind put in its own ~/published/ shows up here; nothing else on their machine does.
-A file they remove from ~/published/ is removed here too — publishing is theirs to take back.
-Put what you want *them* to read in your own ~/published/.
-"""
 
 
 def _seal_tree(root: Path):
@@ -308,8 +317,9 @@ def write_peer(body: dict) -> dict:
     files, keep = body.get("files") or [], body.get("keep")
     if not isinstance(files, list) or not isinstance(keep, list):
         raise ValueError("files and keep must be lists")
-    PEERS_DIR.mkdir(parents=True, exist_ok=True)
-    root = (PEERS_DIR / peer).resolve()
+    peers = _mirror() / "peers"
+    peers.mkdir(exist_ok=True)
+    root = (peers / peer).resolve()
 
     def place(rel) -> Path:
         p = (root / str(rel)).resolve()
@@ -347,10 +357,7 @@ def write_peer(body: dict) -> dict:
     (root / ".synced.json").write_text(json.dumps({"synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                                    "files": len(keep_paths), "not_copied": skipped}, indent=1),
                                        encoding="utf-8")
-    readme = PEERS_DIR / "README.md"
-    if not readme.exists() or readme.read_text(encoding="utf-8") != PEERS_README:
-        readme.write_text(PEERS_README, encoding="utf-8")
-    _seal_tree(PEERS_DIR)
+    _seal_tree(MIRROR_DIR)
     return {"ok": True, "peer": peer, "written": written, "removed": removed}
 
 
@@ -423,6 +430,8 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path == "/peers":
                     return self._send(200, write_peer(body))
                 return self._send(200, append_slab(body.get("entries") or []))
+            except MirrorTaken as exc:
+                return self._send(409, {"error": str(exc)})
             except (ValueError, TypeError) as exc:
                 return self._send(400, {"error": f"bad {self.path[1:]} batch: {exc}"})
             except OSError as exc:
