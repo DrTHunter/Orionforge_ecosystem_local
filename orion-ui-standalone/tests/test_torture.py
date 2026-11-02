@@ -11063,7 +11063,7 @@ class _TortureLoopHost:
         self.n = 0
         self.views = []
 
-    def prepare(self, agent, view):
+    def prepare(self, agent, view, query="", k=0):
         self.views.append(view)
         return [{"role": "system", "content": f"You are {agent}."}], []
 
@@ -11803,7 +11803,7 @@ def test_agi_loop_cache_discipline():
             super().__init__()
             self.sent = []
 
-        def prepare(self, agent, view):
+        def prepare(self, agent, view, query="", k=0):
             self.views.append(view)
             return ([{"role": "system", "content": "IDENTITY + PROTOCOLS"},
                      {"role": "system", "content": f"RETRIEVED for tick {len(self.views)}", "dynamic": True}], [])
@@ -11843,7 +11843,7 @@ def test_agi_loop_cache_discipline():
         check("no prompt yet → hit rate is unknown, not zero", plain.status()["session_cache"]["hit_rate"] is None)
 
         class PlainHost(SplitHost):
-            def prepare(self, agent, view):
+            def prepare(self, agent, view, query="", k=0):
                 self.views.append(view)
                 return [{"role": "system", "content": "ONLY"}], []
         ph = PlainHost()

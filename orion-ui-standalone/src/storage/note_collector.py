@@ -3,7 +3,8 @@
 Reads ``config/settings.json`` to determine which notes are attached
 to each agent and what mode they're in:
 
-- **always** — raw text, injected verbatim into the system prompt every session.
+- **always** — raw text, injected verbatim into the system prompt every session
+  (opt-in only; unset modes default to directive).
 - **directive** — chunked soul scripts / canon notes indexed into a SEPARATE
   NotesFAISS index.  Semantically searched at runtime and injected above
   memory vault context for priority.
@@ -108,6 +109,40 @@ def _get_agent_note_config(agent_name: str) -> dict:
     return settings.get("agent_configs", {}).get(agent_name, {})
 
 
+def migrate_always_to_directive(paths) -> int:
+    """One-time switch of every 'always' note to 'directive' (FAISS retrieval).
+
+    Edits the raw JSON so encrypted secrets are left untouched. A marker in
+    each file keeps it from re-running, so a note an operator sets back to
+    'always' afterwards stays that way. Returns the number of notes switched.
+    """
+    switched = 0
+    for path in paths:
+        path = Path(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        migrations = data.setdefault("migrations", {})
+        if migrations.get("notes_directive_v1"):
+            continue
+        for cfg in (data.get("agent_configs") or {}).values():
+            modes = cfg.setdefault("note_modes", {})
+            for nid in cfg.get("attached_notes", []):
+                if modes.get(nid, "always") == "always":
+                    modes[nid] = "directive"
+                    switched += 1
+            for info in (cfg.get("note_attachments") or {}).values():
+                if info.get("mode", "always") == "always":
+                    info["mode"] = "directive"
+                    switched += 1
+        migrations["notes_directive_v1"] = True
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    return switched
+
+
 def collect_notes(
     agent_name: str,
     query: Optional[str] = None,
@@ -146,7 +181,7 @@ def collect_notes(
     modes = agent_cfg.get("note_modes", {})
 
     for nid in attached:
-        mode = modes.get(nid, "always")
+        mode = modes.get(nid, "directive")
         if mode == "always":
             text = _load_user_note_text(nid)
             if text:
@@ -159,7 +194,7 @@ def collect_notes(
     for filename, info in note_attachments.items():
         if not info.get("attached", False):
             continue
-        mode = info.get("mode", "always")
+        mode = info.get("mode", "directive")
         if mode == "always":
             text = _load_builtin_note_text(filename)
             if text:

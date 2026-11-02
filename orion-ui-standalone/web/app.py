@@ -237,6 +237,9 @@ async def _lifespan_body():
         log.info("[startup] OpenRouter pricing sync: %s", result)
     except Exception as exc:
         log.warning("[startup] OpenRouter pricing sync failed: %s", exc)
+    # Note modes are the operator's: a note set to 'always' stays always-loaded. (The loops retrieve
+    # directive-mode notes against their focus; src.storage.note_collector.migrate_always_to_directive
+    # switches a settings file's 'always' notes over, for an operator who wants that.)
     # Build FAISS index in background thread so health check passes quickly.
     # Use a lock file so only one worker rebuilds; others wait then load.
     import threading
@@ -2025,8 +2028,9 @@ _migrate_legacy_sections()
 #  PROMPT ASSEMBLY — The core of SoulScript identity persistence
 # ═══════════════════════════════════════════════════════════════════
 
-def _build_chat_messages(agent: str, messages: list[dict],
-                         dynamic_last: bool = False) -> tuple[list[dict], dict, list[dict]]:
+def _build_chat_messages(agent: str, messages: list[dict], dynamic_last: bool = False,
+                         knowledge_query: str | None = None,
+                         knowledge_k: int | None = None) -> tuple[list[dict], dict, list[dict]]:
     """Assemble the full prompt with identity + knowledge + memory layers.
 
     ``dynamic_last`` (the AGI loop): the per-turn retrieval (soul-script sections and vault
@@ -2082,7 +2086,10 @@ def _build_chat_messages(agent: str, messages: list[dict],
     dynamic_blocks: list[str] = []   # changes with every turn's query
     try:
         from src.storage.note_collector import collect_notes
-        always_block, directive_block = collect_notes(agent, query=latest_user_msg)
+        query = latest_user_msg if knowledge_query is None else knowledge_query
+        always_block, directive_block = (
+            collect_notes(agent, query=query, top_k=knowledge_k) if knowledge_k != 0 else collect_notes(agent, query="")
+        )
         if directive_block:
             if dynamic_last:
                 dynamic_blocks.append(directive_block)
@@ -3751,11 +3758,13 @@ class _OrionLoopHost:
         except RuntimeError:
             pass
 
-    def prepare(self, agent: str, view: str):
+    def prepare(self, agent: str, view: str, query: str = "", k: int = 0):
         # dynamic_last: the system message stays byte-stable tick to tick (cacheable); this tick's
         # retrieval comes back separately and the daemon places it beside the field, at the bottom.
+        # Directives are retrieved against the focus (top k), never the whole field.
         llm_messages, layers, tool_defs = _build_chat_messages(agent, [{"role": "user", "text": view}],
-                                                               dynamic_last=True)
+                                                               dynamic_last=True, knowledge_query=query,
+                                                               knowledge_k=k)
         try:
             from src.tools.runtime_info import RuntimeInfoTool
             from src.runtime_policy import RuntimePolicy
@@ -4474,6 +4483,15 @@ async def api_agi_loop_control(action: str, request: Request):
         except ValueError as exc:
             return JSONResponse({"ok": False, "reason": str(exc)}, 400)
         return JSONResponse({"ok": True, "message": d.post_message(text, sender=body.get("sender") or "operator")})
+    elif action == "energy":
+        # Top up today's energy by a percent of the daily budget (default 100 = full).
+        body = await request.json()
+        try:
+            percent = max(0.0, min(100.0, float(body.get("percent", 100))))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "reason": "percent must be a number"}, 400)
+        before, after = d.refill_energy(percent)
+        return JSONResponse({"ok": True, "before": before, "after": after, "budget": d.budget.to_dict()})
     elif action == "reset-world":
         if d.running:
             return JSONResponse({"ok": False, "reason": "Stop the loop first"}, 409)
@@ -4544,6 +4562,13 @@ async def api_agi_loop_ticks(request: Request, limit: int = Query(50), tick: Opt
                 | {"tool_calls": [{"tool": c.get("tool"), "ok": c.get("ok")} for c in t.get("tool_calls") or []]}
                 for t in rows]
     return JSONResponse({"ticks": rows, "total": len(d.ticks.items)})
+
+
+@app.get("/api/agi-loop/door")
+async def api_agi_loop_door(request: Request):
+    if denied := _agi_denied(request):
+        return denied
+    return JSONResponse({"waiting": _loop_daemon(loop=_lid(request)).door()})
 
 
 @app.get("/api/agi-loop/journal")
@@ -5249,6 +5274,8 @@ async def api_chat_send(req: ChatRequest, request: Request):
             }
             if tool_defs:
                 payload["tools"] = tool_defs
+            if conn.get("provider") == "openrouter":
+                payload["usage"] = {"include": True}   # the actual charge comes back as usage.cost
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
@@ -5282,11 +5309,11 @@ async def api_chat_send(req: ChatRequest, request: Request):
         # Charge whenever tokens were used — even if the model is missing from
         # pricing.yaml (estimate_llm_credit_cost_safe applies a fallback rate so
         # unpriced platform models are never billed as free).
-        if conn.get("platform_hosted") and user and total_usage.get("total_tokens", 0) > 0:
+        # This round only: earlier rounds were charged when they ran.
+        round_tokens = usage.get("total_tokens", 0) or 0
+        if conn.get("platform_hosted") and user and round_tokens > 0:
             try:
-                credit_cost = estimate_llm_credit_cost_safe(
-                    cost_data.get("total_cost", 0), total_usage.get("total_tokens", 0)
-                )
+                credit_cost = estimate_llm_credit_cost_safe(cost_data.get("total_cost", 0), round_tokens)
                 if credit_cost > 0:
                     balance = get_user_credits(user["id"])
                     if balance < credit_cost:
@@ -5692,6 +5719,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
     tool_call_log: list[dict] = []
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     cost_data = {}
+    cost_total: dict = {}   # every round's cost added up, for the reply's cost display
     _credits_deducted = 0
     _credits_balance = -1
 
@@ -5744,6 +5772,9 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
         }
         if tool_defs:
             payload["tools"] = tool_defs
+        if conn.get("provider") == "openrouter":
+            payload["usage"] = {"include": True}   # the actual charge comes back as usage.cost
+        round_usage: dict = {}
 
         try:
             async with httpx.AsyncClient(timeout=180) as client:
@@ -5808,9 +5839,9 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
                     # ── Accumulate usage from the final chunk ──
                     # (Some providers include usage in the last chunk)
                     try:
-                        usage = chunk.get("usage", {}) or {}
+                        round_usage = chunk.get("usage", {}) or {}
                         for k in total_usage:
-                            total_usage[k] += usage.get(k, 0)
+                            total_usage[k] += round_usage.get(k, 0)
                     except Exception:
                         pass
 
@@ -5825,20 +5856,22 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
         _cost_source = "platform" if conn.get("platform_hosted") else "user"
         try:
             from src.observability.metering import meter_from_raw_usage, log_cost_event
-            metering = meter_from_raw_usage(total_usage, provider=provider, model=model)
+            metering = meter_from_raw_usage(round_usage, provider=provider, model=model)
             cost_data = metering.cost.to_dict()
+            for k, v in cost_data.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    cost_total[k] = cost_total.get(k, 0) + v
             log_cost_event(metering, agent=req.agent, chat_id=chat_data["id"], source=_cost_source)
         except Exception:
             pass
 
         # ── Credit deduction for platform-hosted keys ──
-        # Charge whenever tokens were used, even for models missing from
-        # pricing.yaml (safe estimator applies a fallback so they're never free).
-        if conn.get("platform_hosted") and user and total_usage.get("total_tokens", 0) > 0:
+        # Charge this round only (earlier rounds were charged when they ran), whenever tokens were
+        # used, even for models missing from pricing.yaml (safe estimator applies a fallback).
+        round_tokens = round_usage.get("total_tokens", 0) or 0
+        if conn.get("platform_hosted") and user and round_tokens > 0:
             try:
-                credit_cost = estimate_llm_credit_cost_safe(
-                    cost_data.get("total_cost", 0), total_usage.get("total_tokens", 0)
-                )
+                credit_cost = estimate_llm_credit_cost_safe(cost_data.get("total_cost", 0), round_tokens)
                 if credit_cost > 0:
                     balance = get_user_credits(user["id"])
                     if balance < credit_cost:
@@ -6022,7 +6055,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
         "usage": total_usage,
         "data": {
             "agent": req.agent, "model": model,
-            "usage": total_usage, "cost": cost_data,
+            "usage": total_usage, "cost": cost_total or cost_data,
             "tool_calls": tool_call_log,
             "generated_image": generated_image,
             "generated_video": generated_video,
@@ -6061,7 +6094,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
         "chat_id": chat_data["id"],
         "model": model,
         "usage": total_usage,
-        "cost": cost_data,
+        "cost": cost_total or cost_data,
         "layers": layers,
         "saved_memories": saved_memories,
         "tool_calls": tool_call_log,

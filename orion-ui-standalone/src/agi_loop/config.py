@@ -34,6 +34,12 @@ RETIRED_LLM_SLUGS = {
     "google/gemini-3.5-flash", "x-ai/grok-4.3",
 }
 
+# Bumped when the recommended knobs change. A saved config from an older
+# revision has these fields reset to the new defaults once, on load. Only the context
+# knobs: what a loop may spend (budget, cap, cadence) is the operator's and is never reset.
+REVISION = 2
+_REVISED_FIELDS = ("max_steps_per_tick", "max_tool_calls_per_tick", "history_window", "directive_k")
+
 
 @dataclass
 class LoopConfig:
@@ -57,9 +63,12 @@ class LoopConfig:
     max_tokens_per_tick: int = 30_000
 
     # Per-tick limits
-    max_steps_per_tick: int = 4        # model ↔ tool round trips
-    max_tool_calls_per_tick: int = 12
-    history_window: int = 4            # earlier ticks carried as conversation (grows to 2× before trimming, for the cache)
+    max_steps_per_tick: int = 6        # model ↔ tool round trips
+    max_tool_calls_per_tick: int = 8
+    history_window: int = 2            # earlier ticks carried as conversation (grows to 2× before trimming, for the cache)
+
+    # Knowledge: directives/notes come in by FAISS retrieval against the focus, never wholesale.
+    directive_k: int = 2               # retrieved chunks per tick; the rest it looks up when needed
 
     # The llm tool: a side call to another model, at the mind's choice. Each choice has an OpenRouter
     # slug and a native (provider, model) for when the loop's connection is that provider's own API.
@@ -83,6 +92,7 @@ class LoopConfig:
     rumination_ticks: int = 5          # ticks at one focus without acting before the body notices
 
     workbench: bool = True
+    revision: int = REVISION
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LoopConfig":
@@ -118,6 +128,8 @@ class LoopConfig:
         out.max_steps_per_tick = max(1, out.max_steps_per_tick)
         out.cheap_max_tokens = max(64, min(32000, out.cheap_max_tokens))
         out.gate_max_skips = max(0, out.gate_max_skips)
+        out.history_window = min(max(0, out.history_window), 6)
+        out.directive_k = min(max(0, out.directive_k), 12)
         return out
 
     def to_dict(self) -> dict:
@@ -126,7 +138,16 @@ class LoopConfig:
     @classmethod
     def load(cls, path: Path) -> "LoopConfig":
         try:
-            return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            cfg = cls.from_dict(data)
+            if int(data.get("revision") or 1) < REVISION:
+                fresh = cls()
+                for name in _REVISED_FIELDS:
+                    setattr(cfg, name, getattr(fresh, name))
+                cfg.revision = REVISION
+                cfg.save(path)
+                log.info("[agi_loop] config upgraded to revision %d", REVISION)
+            return cfg
         except FileNotFoundError:
             return cls()
         except Exception as exc:

@@ -28,9 +28,11 @@ class DailyBudget:
         self.tokens_per_day = max(1, int(tokens_per_day))
         self.cost_per_day = float(cost_per_day or 0.0)
         self.day = _today(self.tz)
-        self.tokens = 0
+        self.tokens = 0            # spent today — the tracker; a refill never lowers it
         self.cost = 0.0
         self.ticks = 0
+        self.base_tokens = 0       # where energy is measured from: a refill moves these, not the spend
+        self.base_cost = 0.0
         self._load()
 
     def _load(self):
@@ -40,6 +42,8 @@ class DailyBudget:
                 self.tokens = int(data.get("tokens", 0))
                 self.cost = float(data.get("cost", 0.0))
                 self.ticks = int(data.get("ticks", 0))
+                self.base_tokens = int(data.get("base_tokens", 0))
+                self.base_cost = float(data.get("base_cost", 0.0))
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -47,13 +51,15 @@ class DailyBudget:
 
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"day": self.day, "tokens": self.tokens,
-                                         "cost": round(self.cost, 6), "ticks": self.ticks}), encoding="utf-8")
+        self.path.write_text(json.dumps({"day": self.day, "tokens": self.tokens, "cost": round(self.cost, 6),
+                                         "ticks": self.ticks, "base_tokens": self.base_tokens,
+                                         "base_cost": round(self.base_cost, 6)}), encoding="utf-8")
 
     def _roll(self):
         today = _today(self.tz)
         if today != self.day:
             self.day, self.tokens, self.cost, self.ticks = today, 0, 0.0, 0
+            self.base_tokens, self.base_cost = 0, 0.0
             self._save()
 
     def spend(self, tokens: int, cost: float, tick: bool = True):
@@ -63,30 +69,48 @@ class DailyBudget:
         self.ticks += 1 if tick else 0
         self._save()
 
+    def refill(self, fraction: float):
+        """The operator adds ``fraction`` of a full day's energy (1.0 = full), on top of what's left now,
+        whatever was spent before — capped at full. What was spent stays on the books: only the point
+        energy is measured from moves."""
+        self._roll()
+        target = min(1.0, self.energy + max(0.0, min(1.0, float(fraction))))
+        self.base_tokens = self.tokens - int(round((1.0 - target) * self.tokens_per_day))
+        self.base_cost = self.cost - (1.0 - target) * self.cost_per_day if self.cost_per_day > 0 else 0.0
+        self._save()
+
+    @property
+    def _drawn_tokens(self) -> int:
+        return self.tokens - self.base_tokens
+
+    @property
+    def _drawn_cost(self) -> float:
+        return self.cost - self.base_cost
+
     @property
     def tokens_left(self) -> int:
         self._roll()
-        return max(0, self.tokens_per_day - self.tokens)
+        return max(0, self.tokens_per_day - self._drawn_tokens)
 
     @property
     def energy(self) -> float:
         """Fraction of today's budget left, limited by whichever cap is tighter."""
         self._roll()
-        frac = 1.0 - self.tokens / self.tokens_per_day
+        frac = 1.0 - self._drawn_tokens / self.tokens_per_day
         if self.cost_per_day > 0:
-            frac = min(frac, 1.0 - self.cost / self.cost_per_day)
+            frac = min(frac, 1.0 - self._drawn_cost / self.cost_per_day)
         return max(0.0, min(1.0, frac))
 
     @property
     def cost_binds(self) -> bool:
         """True when the dollar cap, not the token cap, is what's setting energy."""
         self._roll()
-        return self.cost_per_day > 0 and (1.0 - self.cost / self.cost_per_day) < (1.0 - self.tokens / self.tokens_per_day)
+        return self.cost_per_day > 0 and             (1.0 - self._drawn_cost / self.cost_per_day) < (1.0 - self._drawn_tokens / self.tokens_per_day)
 
     def left_text(self) -> str:
         """What's left today, in the units of whichever cap is tighter — so it always agrees with energy."""
         if self.cost_binds:
-            return f"${max(0.0, self.cost_per_day - self.cost):.2f} of ${self.cost_per_day:.2f} left today"
+            return f"${max(0.0, self.cost_per_day - self._drawn_cost):.2f} of ${self.cost_per_day:.2f} left today"
         return f"{self.tokens_left:,} tokens left today"
 
     @property

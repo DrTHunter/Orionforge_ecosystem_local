@@ -68,6 +68,7 @@ How to act:
 - linux — your own machine, if you have one: run commands, install, build, keep things running.
 - llm — hand a self-contained task to another model, cheap or frontier, your pick; it sees only what you give it.
 - loop_control — set your own pace (wake fast while something is live, slow when it isn't, change it any time), rest when nothing is worth the energy (a message still wakes you), or stop.
+- your directives and notes aren't all loaded each tick — only the few closest to your focus. When you need a protocol or canon, look it up (directives, memory).
 
 The ⏲ clock line under the HUD is measured by the host, not felt: the wall time now — in the operator's time zone and in UTC — when your last tick began, how long it ran, and how long you actually slept against what was planned. When you tell anyone what time it is or when something happened, read it off that line in the operator's time; never estimate a time from how long things felt. Order your own records by tick; stamp them with UTC from that line; never infer one from the other. The pace line says what rhythm you're on and whether low energy is stretching it.
 
@@ -123,7 +124,7 @@ class Completion:
 
 
 class Host(Protocol):
-    def prepare(self, agent: str, view: str) -> Tuple[List[dict], List[dict]]: ...
+    def prepare(self, agent: str, view: str, query: str = "", k: int = 0) -> Tuple[List[dict], List[dict]]: ...
     async def complete(self, config: LoopConfig, messages: List[dict], tools: List[dict]) -> Completion: ...
     def call_tool(self, agent: str, name: str, args: dict) -> str: ...
     def after_response(self, agent: str, text: str) -> str: ...
@@ -637,6 +638,29 @@ class LoopDaemon:
         self.next_wake_at = None
         self.resting = None
 
+    def refill_energy(self, percent: float) -> tuple:
+        """The operator tops up today's energy by ``percent`` (100 = full). An exhausted loop wakes."""
+        before = self.budget.energy
+        self.budget.refill(percent / 100.0)
+        after = self.budget.energy
+        self.event("energy", f"energy restored {before:.0%} → {after:.0%}")
+        if self.phase == "exhausted" and after > 0:
+            self._poke("poke")
+        return before, after
+
+    def door(self) -> List[dict]:
+        """Everything waiting at the door, in full: unanswered messages and tasks in the field,
+        and messages that haven't been sensed yet."""
+        full = {m.get("id"): m.get("text", "") for m in self.conversation.items if m.get("role") == "operator"}
+        out = [{"id": m["id"], "kind": "message", "sender": m.get("sender", ""), "ts": m.get("ts"),
+                "text": m.get("text", ""), "state": "not seen yet"} for m in self.queue]
+        waiting = sorted((i for i in self.world.items.values() if i.kind in ("message", "task") and not i.resolved),
+                         key=lambda i: i.born)
+        for i in waiting:
+            out.append({"id": i.id, "kind": i.kind, "sender": i.meta.get("sender", ""), "ts": _iso(i.born) if i.born else None,
+                        "text": full.get(i.meta.get("message_id")) or i.text, "state": "in the field"})
+        return out
+
     def wake_now(self):
         self._poke("poke")
 
@@ -896,7 +920,7 @@ class LoopDaemon:
                 "tokens": result.get("tokens", 0), "cost": round(result.get("cost", 0.0), 6),
                 "prompt_tokens": result.get("prompt_tokens", 0), "cached_tokens": result.get("cached_tokens", 0),
                 "latency": round(result.get("latency", 0.0), 2), "steps": result.get("steps", 0),
-                "error": result.get("error"),
+                "error": result.get("error"), "context": result.get("context", {}),
                 "surprises": w.surprises, "pulled": w.pulled, "faded": w.faded,
             }
             self.ticks.append(entry)
@@ -1195,7 +1219,9 @@ class LoopDaemon:
         self._side_spend = {"tokens": 0, "cost": 0.0}
         with self._stage("think") as p:
             try:
-                prepared, registry_tools = await asyncio.to_thread(self.host.prepare, c.agent, view)
+                query = self._knowledge_query()
+                prepared, registry_tools = await asyncio.to_thread(self.host.prepare, c.agent, view, query,
+                                                                   c.directive_k)
                 # Cache discipline: everything that's the same every tick stays on top, byte for byte
                 # (identity, notes, protocols, this preamble). What was retrieved for *this* tick goes
                 # at the bottom with the field, so the provider's prefix cache can hit.
@@ -1220,6 +1246,13 @@ class LoopDaemon:
                 now_content = view if not retrieved else (
                     f"{RETRIEVED_HEADER}\n\n{retrieved}\n\n---\n\n{view}")
                 messages.append({"role": "user", "content": now_content, "cache": True})
+                # What filled the prompt, part by part — for judging what each tick costs.
+                result["context"] = {
+                    "system_chars": sum(len(m.get("content") or "") for m in system),
+                    "history_chars": sum(len(m.get("content") or "") for m in messages[len(system):-1]),
+                    "retrieved_chars": len(retrieved), "view_chars": len(view),
+                    "tool_def_chars": len(json.dumps(tool_defs)), "retrieval_query": query[:200],
+                }
 
                 calls = 0
                 for step in range(c.max_steps_per_tick + 1):
@@ -1320,6 +1353,18 @@ class LoopDaemon:
         if comp.finish_reason == "length":
             head += " (cut off at max_tokens)"
         return f"{head}\n{text or '(it returned no text)'}"
+
+    def _knowledge_query(self) -> str:
+        """What directive retrieval searches on: the focus and held intentions, not the whole field."""
+        w = self.world
+        parts = []
+        focus = w.items.get(w.focus_item) if w.focus_item else None
+        if focus:
+            parts.append(focus.text)
+        elif w.focus_text:
+            parts.append(w.focus_text)
+        parts += [i.text for i in w.items.values() if i.held and i.kind == "intention" and i is not focus]
+        return "\n".join(parts)[:1000]
 
     async def _call_tool(self, name: str, args: dict) -> Tuple[str, bool, float]:
         t0 = time.perf_counter()

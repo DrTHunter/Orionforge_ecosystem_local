@@ -38,6 +38,7 @@
   /* vitals strip */
   .al-vitals { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .5rem; margin-bottom: 1rem; }
   .al-vital { background: var(--card); border: 1px solid var(--bd); border-radius: .6rem; padding: .55rem .75rem; min-width: 0; }
+  .al-vital.click { cursor: pointer; } .al-vital.click:hover { border-color: var(--acc); }
   .al-vital .k { font-size: .62rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--dim); }
   .al-vital .v { font-size: 1rem; font-weight: 800; margin-top: .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .al-bar { height: 6px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; margin-top: .3rem; }
@@ -284,10 +285,10 @@
   <div class="al-vitals">
     <div class="al-vital"><div class="k">Stage</div><div class="v al-mono" id="v-stage">&mdash;</div></div>
     <div class="al-vital"><div class="k">Tick</div><div class="v" id="v-tick">0</div></div>
-    <div class="al-vital"><div class="k">Energy</div><div class="v" id="v-energy">&mdash;</div><div class="al-bar"><i id="v-energy-bar" style="width:0"></i></div></div>
+    <div class="al-vital click" onclick="openEnergy()" title="Restore energy"><div class="k">Energy &#8635;</div><div class="v" id="v-energy">&mdash;</div><div class="al-bar"><i id="v-energy-bar" style="width:0"></i></div></div>
     <div class="al-vital"><div class="k">Mood</div><div class="v" id="v-mood">&mdash;</div></div>
     <div class="al-vital"><div class="k">Focus</div><div class="v" id="v-focus">&mdash;</div></div>
-    <div class="al-vital"><div class="k">At the door</div><div class="v" id="v-door">0</div></div>
+    <div class="al-vital click" onclick="openDoor()" title="See what's waiting"><div class="k">At the door</div><div class="v" id="v-door">0</div></div>
     <div class="al-vital"><div class="k">Next wake</div><div class="v al-mono" id="v-wake">&mdash;</div></div>
   </div>
 
@@ -607,7 +608,8 @@
         <div class="full al-small al-muted" style="font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin-top:.5rem">Per tick</div>
         <div><label>Max model steps</label><input class="al-input" name="max_steps_per_tick" type="number" min="1"></div>
         <div><label>Max tool calls</label><input class="al-input" name="max_tool_calls_per_tick" type="number" min="0"></div>
-        <div><label>Earlier ticks carried</label><input class="al-input" name="history_window" type="number" min="0"></div>
+        <div><label>Earlier ticks carried</label><input class="al-input" name="history_window" type="number" min="0" max="6"></div>
+        <div><label>Directive chunks recalled</label><input class="al-input" name="directive_k" type="number" min="0" max="12"><div class="help">Directives and notes closest to the focus, per tick. The rest the agent looks up when it needs them.</div></div>
 
         <div class="full al-small al-muted" style="font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin-top:.5rem">Inner world</div>
         <div><label>Capacity (chars)</label><input class="al-input" name="capacity_chars" type="number" min="600" step="100"><div class="help">How much the field holds before things compress and fade.</div></div>
@@ -780,6 +782,34 @@ async function api(path, opts) {
 }
 function openModal(title, html) { $('al-modal-title').textContent = title; $('al-modal-body').innerHTML = html; $('al-modal').classList.add('open'); }
 function closeModal() { $('al-modal').classList.remove('open'); }
+
+/* ── Energy & door (vitals) ───────────────────────── */
+function openEnergy() {
+  const b = (AL.status || {}).budget || {};
+  openModal('Restore energy', `<p class="hint">Now at <b>${Math.round((b.energy || 0) * 100)}%</b>. Adds a share of today's budget back; it can't go past 100%. An exhausted loop wakes up.</p>`
+    + `<div class="al-row" style="margin-top:.75rem;gap:.5rem;flex-wrap:wrap">`
+    + [25, 50, 100].map(p => `<button class="al-btn al-btn-sm" onclick="$('en-pct').value=${p}">${p}%</button>`).join('')
+    + `<input class="al-input" id="en-pct" type="number" min="1" max="100" value="100" style="width:6rem"> <span>%</span>`
+    + `<button class="al-btn b-acc" onclick="addEnergy()">Add</button></div>`);
+}
+async function addEnergy() {
+  const pct = Number($('en-pct').value);
+  if (!(pct > 0 && pct <= 100)) return toast('Pick 1–100%', 'error');
+  const r = await api('/api/agi-loop/energy', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({percent: pct})});
+  if (!r.ok) return toast(r.reason || 'Failed', 'error');
+  closeModal();
+  toast(`Energy ${Math.round(r.before * 100)}% → ${Math.round(r.after * 100)}%`);
+  loadStatus();
+}
+async function openDoor() {
+  openModal('At the door', '<div class="al-empty">Loading…</div>');
+  const r = await api('/api/agi-loop/door');
+  const w = r.waiting || [];
+  $('al-modal-body').innerHTML = w.length ? w.map(m =>
+    `<div class="al-li" style="cursor:default"><div class="top"><span>${m.kind === 'task' ? '📋 task' : '💬 ' + esc(m.sender || 'message')} · ${esc(m.state)}</span><span>${m.ts ? new Date(m.ts).toLocaleString() : ''}</span></div>`
+    + `<pre class="al-pre" style="margin-top:.35rem">${esc(m.text)}</pre></div>`).join('')
+    : '<div class="al-empty">No one is waiting at the door.</div>';
+}
 
 /* ── Tabs ─────────────────────────────────────────── */
 function switchTab(id) {
@@ -1353,9 +1383,31 @@ async function loadJournal() {
   const list = (r.entries || []).slice().reverse();
   $('jn-count').textContent = (r.total || 0) + ' entries';
   $('jn-list').innerHTML = list.length ? list.map(j =>
-    `<div class="al-li ${j.had_error ? 'err' : ''}" onclick="this.querySelector('.body').classList.toggle('clamp')"><div class="top"><span>#${j.tick} · ${clock(j.ts)} · ${esc(j.focus || '')} · ${esc(j.mood || '')}</span><span>${tok(j.tokens)} tok · $${(j.cost || 0).toFixed(4)}</span></div>`
-    + `<div class="body clamp">${esc(j.narrative)}</div>${(j.tools_used || []).length ? `<div class="al-row" style="margin-top:.3rem">${j.tools_used.map(t => `<span class="al-chip">${esc(t)}</span>`).join('')}</div>` : ''}</div>`).join('')
+    `<div class="al-li ${j.had_error ? 'err' : ''}" data-tick="${j.tick}" onclick="toggleJournal(this, ${j.tick})"><div class="top"><span>#${j.tick} · ${clock(j.ts)} · ${esc(j.focus || '')} · ${esc(j.mood || '')}</span><span>${tok(j.tokens)} tok · $${(j.cost || 0).toFixed(4)}</span></div>`
+    + `<div class="body clamp">${esc(j.narrative)}</div>${(j.tools_used || []).length ? `<div class="al-row" style="margin-top:.3rem">${j.tools_used.map(t => `<span class="al-chip">${esc(t)}</span>`).join('')}</div>` : ''}<div class="jn-full" style="display:none" onclick="event.stopPropagation()"></div></div>`).join('')
     : '<div class="al-empty">Empty.</div>';
+  (AL._jnOpen || new Set()).forEach(t => { const row = document.querySelector(`#jn-list .al-li[data-tick="${t}"]`); if (row) toggleJournal(row, t); });
+}
+async function toggleJournal(row, tick) {
+  const body = row.querySelector('.body'), full = row.querySelector('.jn-full');
+  AL._jnOpen = AL._jnOpen || new Set();
+  if (full.style.display !== 'none') { full.style.display = 'none'; body.style.display = ''; AL._jnOpen.delete(tick); return; }
+  AL._jnOpen.add(tick);
+  full.style.display = '';
+  if (!full.dataset.loaded) {
+    full.innerHTML = '<div class="al-empty">Loading…</div>';
+    const r = await api('/api/agi-loop/ticks?tick=' + tick);
+    const t = (r.ticks || [])[0];
+    if (!t) { full.innerHTML = `<pre class="al-pre" style="margin-top:.4rem">${esc(body.textContent)}</pre><div class="al-small al-dim" style="margin-top:.3rem">That tick has rolled out of the log; this is the journal's summary.</div>`; }
+    else {
+      const tools = (t.tool_calls || []).map(c => `<div class="al-small al-mono" style="margin-top:.5rem;color:${c.ok ? 'var(--tx)' : '#fca5a5'}">${esc(c.tool)} ${esc(JSON.stringify(c.arguments || {}))}</div><pre class="al-pre" style="margin-top:.2rem">${esc(c.result)}</pre>`).join('');
+      full.innerHTML = (t.error ? `<div style="color:#fca5a5;margin-top:.4rem">${esc(t.error)}</div>` : '')
+        + `<pre class="al-pre" style="margin-top:.4rem">${esc(t.response || '(said nothing)')}</pre>`
+        + (tools ? `<div class="al-small al-dim" style="margin-top:.6rem">Tool calls</div>${tools}` : '');
+    }
+    full.dataset.loaded = '1';
+  }
+  body.style.display = 'none';
 }
 async function clearJournal() {
   if (!confirm('Clear the journal? Ticks and the inner world are kept.')) return;

@@ -1273,7 +1273,7 @@
           </p>
           <div class="notes-grid" id="notes-grid-{{ name }}">
             {% for note_id in cfg.get('attached_notes', []) %}
-            {% set mode = cfg.get('note_modes', {}).get(note_id, 'always') %}
+            {% set mode = cfg.get('note_modes', {}).get(note_id, 'directive') %}
             {% set is_essential = note_id in cfg.get('essential_notes', []) %}
             {% set note_info = notes | selectattr('id', 'equalto', note_id) | first %}
             {% set note_title = note_info.title if note_info else note_id %}
@@ -2129,7 +2129,7 @@
       if (!check.checked) continue;
       const id = row.dataset.id;
       attached.push(id);
-      modes[id] = 'always';
+      modes[id] = 'directive';
       const noteData = _allNotes.find(n => n.id === id);
       const emoji = noteData?.emoji || '📝';
       const title = noteData?.title || id;
@@ -2138,8 +2138,8 @@
           <span class="note-name">${emoji} ${title}</span>
           <span class="note-source">user note</span>
           <div style="display:flex; align-items:center; gap:0.375rem;">
-            <span class="mode-label always" id="ml-${agent}-${id}">ALWAYS</span>
-            <div class="mode-toggle" id="mt-${agent}-${id}"
+            <span class="mode-label directive" id="ml-${agent}-${id}">DIRECTIVE</span>
+            <div class="mode-toggle active" id="mt-${agent}-${id}"
                  onclick="toggleNoteMode('${agent}', '${id}', this)">
               <span class="toggle-knob"></span>
             </div>

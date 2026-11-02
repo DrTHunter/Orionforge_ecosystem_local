@@ -54,7 +54,7 @@ class ScriptedHost:
         self.tasks = []
         self.fail = False
 
-    def prepare(self, agent, view):
+    def prepare(self, agent, view, query="", k=0):
         tools = [{"type": "function", "function": {"name": n, "description": "", "parameters": {}}}
                  for n in ("memory", "inbox", "agi_loop", "model_router")]
         return [{"role": "system", "content": f"You are {agent}."}], tools
@@ -315,6 +315,88 @@ def test_config():
     check("strings coerced", c.daily_token_budget == 5000 and c.workbench is False and c.temperature == 0.3)
     check("floors enforced", c.min_interval_seconds == 5.0)
     check("old router keys ignored", not hasattr(c, "tiers"))
+
+
+def test_config_revision():
+    print("\n=== Config revision ===")
+    tmp = tempfile.mkdtemp()
+    try:
+        path = Path(tmp) / "agi_loop.json"
+        path.write_text(json.dumps({"agent": "elysia", "daily_token_budget": 12_350_000, "daily_cost_cap": 0,
+                                    "max_tokens_per_tick": 130_000, "history_window": 4, "error_streak_limit": 30,
+                                    "capacity_chars": 2400, "capture_threshold": 0.45}), encoding="utf-8")
+        c = LoopConfig.load(path)
+        check("old config gets the leaner context knobs", c.history_window == 2 and c.directive_k == 2
+              and c.max_steps_per_tick == 6 and c.max_tool_calls_per_tick == 8, c)
+        check("…and keeps every spending choice the operator made", c.daily_token_budget == 12_350_000
+              and c.daily_cost_cap == 0 and c.max_tokens_per_tick == 130_000 and c.error_streak_limit == 30, c)
+        check("identity and field kept", c.agent == "elysia" and c.capacity_chars == 2400 and c.capture_threshold == 0.45)
+        check("upgrade written back", json.loads(path.read_text(encoding="utf-8"))["revision"] == 2)
+        c.daily_token_budget = 500_000
+        c.save(path)
+        check("current revision left alone", LoopConfig.load(path).daily_token_budget == 500_000)
+
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_notes_migrate_to_directive():
+    print("\n=== Notes: always → directive migration ===")
+    from src.storage.note_collector import migrate_always_to_directive
+    tmp = tempfile.mkdtemp()
+    try:
+        path = Path(tmp) / "settings.json"
+        path.write_text(json.dumps({"api_keys": {"openai": "enc:xyz"}, "agent_configs": {
+            "elysia": {"attached_notes": ["a", "b", "c"], "note_modes": {"a": "always", "b": "directive"},
+                       "note_attachments": {"x.md": {"attached": True, "mode": "always"}}}}}), encoding="utf-8")
+        check("always and unset notes switched", migrate_always_to_directive([path]) == 3)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cfg = data["agent_configs"]["elysia"]
+        check("all modes directive", set(cfg["note_modes"].values()) == {"directive"}
+              and cfg["note_attachments"]["x.md"]["mode"] == "directive", cfg)
+        check("secrets untouched", data["api_keys"]["openai"] == "enc:xyz")
+        cfg["note_modes"]["a"] = "always"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        check("runs once — operator's later choice kept", migrate_always_to_directive([path]) == 0
+              and json.loads(path.read_text(encoding="utf-8"))["agent_configs"]["elysia"]["note_modes"]["a"] == "always")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_energy_refill_and_door():
+    print("\n=== Energy refill + the door ===")
+    tmp = tempfile.mkdtemp()
+    try:
+        b = DailyBudget(Path(tmp) / "budget.json", 1000, cost_per_day=1.0)
+        b.spend(3000, 0.4)   # overspent under an older, bigger cap
+        check("overspent → empty", b.energy == 0.0)
+        b.refill(0.5)
+        check("adding 50% from empty gives 50%, whatever was spent before", abs(b.energy - 0.5) < 1e-9, b.energy)
+        check("the tracker keeps every token and dollar", b.tokens == 3000 and abs(b.cost - 0.4) < 1e-9)
+        b.spend(100, 0.0)
+        check("spend after a refill drains from there", abs(b.energy - 0.4) < 1e-9, b.energy)
+        b.refill(1.0)
+        check("refill caps at full", b.energy == 1.0 and b.tokens_left == 1000)
+        again = DailyBudget(Path(tmp) / "budget.json", 1000, cost_per_day=1.0)
+        check("refill survives a restart", again.energy == 1.0 and again.tokens == 3100)
+        d = _daemon(tmp, ScriptedHost(), daily_token_budget=1000)
+        d.budget.spend(1000, 0.0)
+        d.phase = "exhausted"
+        before, after = d.refill_energy(50)
+        check("daemon refill reports before/after", before == 0.0 and abs(after - 0.5) < 1e-9, (before, after))
+        check("exhausted loop is poked awake", d._wake.is_set() and d._wake_cause == "poke")
+        check("refill logged", any(e["kind"] == "energy" for e in d.events.tail(3)))
+
+        long = "x" * 5000
+        d.post_message(long, sender="Trent")
+        door = d.door()
+        check("unsensed message shows at the door in full", len(door) == 1 and door[0]["text"] == long
+              and door[0]["state"] == "not seen yet", door)
+        asyncio.run(d.tick())
+        door = d.door()
+        check("sensed message shows in full, not the field preview", any(m["text"] == long for m in door), door)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────
@@ -928,6 +1010,9 @@ if __name__ == "__main__":
     test_mood_and_expectations()
     test_workbench_and_budget()
     test_config()
+    test_config_revision()
+    test_notes_migrate_to_directive()
+    test_energy_refill_and_door()
     test_daemon_tick()
     test_daemon_tasks_and_limits()
     test_multiple_loops()
