@@ -38,6 +38,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
 
+from src.llm_client.base import temperature_param
+
 log = logging.getLogger("public_chat")
 
 router = APIRouter()
@@ -345,7 +347,7 @@ async def public_chat(request: Request):
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": 0.85,
+        **temperature_param(model, 0.85),   # Claude and GPT-5 / o-series reject one
         "max_tokens": MAX_REPLY_TOKENS + (SUGGEST_EXTRA_TOKENS if suggest else 0),
         "stream": True,
     }

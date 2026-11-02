@@ -94,6 +94,8 @@ import contextvars
 # Lives in src/ so memory modules can see the user too.
 from src.request_context import current_user_id as _current_user_id, user_config_dir as _user_config_dir
 from src.request_context import data_scope as _data_scope
+# Claude and GPT-5 / o-series models reject a temperature: every request body takes it from here.
+from src.llm_client.base import temperature_param as _temperature_param
 
 # ── Project paths ────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -3861,10 +3863,7 @@ class _OrionLoopHost:
             headers["Authorization"] = f"Bearer {conn['api_key']}"
         messages = self._cache_marks(conn, model, messages)
         payload = {"model": model, "messages": messages}
-        # Claude and GPT-5 / o-series models reject temperature (deprecated), so it's only sent to the rest.
-        bare = model.lower().rsplit("/", 1)[-1]
-        if temperature is not None and not bare.startswith(("claude", "gpt-5", "o1", "o3", "o4")):
-            payload["temperature"] = temperature
+        payload.update(_temperature_param(model, temperature))
         if max_tokens:
             payload["max_tokens"] = max_tokens
         if conn.get("provider") == "openrouter":
@@ -5270,7 +5269,7 @@ async def api_chat_send(req: ChatRequest, request: Request):
             payload = {
                 "model": model,
                 "messages": running_messages,
-                "temperature": profile.get("temperature", 0.7),
+                **_temperature_param(model, profile.get("temperature", 0.7)),
             }
             if tool_defs:
                 payload["tools"] = tool_defs
@@ -5767,7 +5766,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
         payload = {
             "model": model,
             "messages": running_messages,
-            "temperature": profile.get("temperature", 0.7),
+            **_temperature_param(model, profile.get("temperature", 0.7)),
             "stream": True,
         }
         if tool_defs:
@@ -6190,7 +6189,7 @@ async def api_chat_auto_title(chat_id: str, request: Request):
                     {"role": "system", "content": "Generate a short (3-6 word) title for this conversation. Reply with ONLY the title."},
                     {"role": "user", "content": snippet},
                 ],
-                "temperature": 0.5, "max_tokens": 20,
+                **_temperature_param(model, 0.5), "max_tokens": 20,
             }, headers=headers)
             resp.raise_for_status()
             title = resp.json()["choices"][0]["message"]["content"].strip().strip('"')
@@ -6760,7 +6759,7 @@ async def _billed_completion(request: Request, conn: dict, model: str, messages:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json={"model": model, "messages": messages,
-                                                "temperature": temperature}, headers=headers)
+                                                **_temperature_param(model, temperature)}, headers=headers)
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPStatusError as exc:
@@ -9318,7 +9317,7 @@ async def api_generate_emoji(chat_id: str):
                     {"role": "system", "content": "Given a chat title, return a SINGLE emoji that best represents the topic. Return ONLY one emoji character, nothing else."},
                     {"role": "user", "content": title},
                 ],
-                "max_tokens": 5, "temperature": 0.3,
+                "max_tokens": 5, **_temperature_param(model, 0.3),
             })
             resp.raise_for_status()
             emoji = resp.json()["choices"][0]["message"]["content"].strip()

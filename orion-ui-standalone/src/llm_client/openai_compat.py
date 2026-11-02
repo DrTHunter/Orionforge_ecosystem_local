@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.llm_client.base import LLMClient, LLMResponse
+from src.llm_client.base import LLMClient, LLMResponse, temperature_param
 
 
 class OpenAICompatClient(LLMClient):
@@ -48,7 +48,7 @@ class OpenAICompatClient(LLMClient):
         body: Dict[str, Any] = {
             "model": self.model,
             "messages": self._convert_messages(messages),
-            "temperature": self.temperature,
+            **temperature_param(self.model, self.temperature),
         }
         if tools:
             body["tools"] = [{"type": "function", "function": t} for t in tools]

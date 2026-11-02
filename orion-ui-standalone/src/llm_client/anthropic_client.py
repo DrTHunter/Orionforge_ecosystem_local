@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.llm_client.base import LLMClient, LLMResponse
+from src.llm_client.base import LLMClient, LLMResponse, temperature_param
 
 
 class AnthropicClient(LLMClient):
@@ -67,7 +67,7 @@ class AnthropicClient(LLMClient):
             "model": self.model,
             "messages": self._convert_messages(conv_messages),
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            **temperature_param(self.model, self.temperature),
         }
 
         if system_text:

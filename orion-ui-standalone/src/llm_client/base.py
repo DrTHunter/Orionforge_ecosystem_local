@@ -5,6 +5,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+def accepts_temperature(model: str) -> bool:
+    """Claude and the GPT-5 / o-series models reject a temperature (deprecated there); the rest take one.
+    Works on a bare id or a provider-prefixed one (anthropic/claude-opus-5.5)."""
+    bare = (model or "").lower().rsplit("/", 1)[-1]
+    return not bare.startswith(("claude", "gpt-5", "o1", "o3", "o4"))
+
+
+def temperature_param(model: str, value: Optional[float]) -> Dict[str, float]:
+    """``{"temperature": value}`` for a request body, or ``{}`` when the model won't take one."""
+    return {"temperature": value} if value is not None and accepts_temperature(model) else {}
+
+
 @dataclass
 class LLMResponse:
     """Provider-agnostic response from any chat completion call."""

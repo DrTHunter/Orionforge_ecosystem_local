@@ -317,6 +317,52 @@ def test_config():
     check("old router keys ignored", not hasattr(c, "tiers"))
 
 
+def test_temperature_only_where_it_is_taken():
+    print("\n=== Temperature: never sent to models that reject it ===")
+    from src.llm_client.base import accepts_temperature, temperature_param
+    for m in ("anthropic/claude-opus-5.5", "claude-sonnet-5-5", "openai/gpt-5.6-sol", "gpt-5", "o3-mini", "o4"):
+        check(f"no temperature for {m}", not accepts_temperature(m) and temperature_param(m, 0.7) == {})
+    for m in ("deepseek/deepseek-v4-pro", "llama3.1:8b", "google/gemini-3.5-flash", "openai/gpt-4o", "gpt-4.1"):
+        check(f"temperature for {m}", temperature_param(m, 0.7) == {"temperature": 0.7})
+    check("a None temperature is never sent", temperature_param("llama3.1:8b", None) == {})
+
+    import src.llm_client.anthropic_client as A
+    import src.llm_client.openai_compat as O
+    sent = {}
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"type": "text", "text": "hi"}], "model": "m", "usage": {},
+                    "choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None, **kw):
+        sent["body"] = json
+        return Resp()
+
+    saved = A.requests.post, O.requests.post
+    A.requests.post = O.requests.post = fake_post
+    try:
+        for cls, model, takes in ((A.AnthropicClient, "claude-opus-5-5", False), (O.OpenAICompatClient, "gpt-5.6-sol", False),
+                                  (O.OpenAICompatClient, "deepseek-chat", True)):
+            client = cls.__new__(cls)
+            client.__dict__.update(model=model, temperature=0.7, api_key="k", max_tokens=100,
+                                   base_url="http://x", url="http://x", timeout=5)
+            try:
+                client.chat([{"role": "user", "content": "x"}])
+            except Exception as exc:
+                check(f"{cls.__name__} ran with the fake transport", False, exc)
+                continue
+            check(f"{cls.__name__} with {model}: temperature {'sent' if takes else 'left out'}",
+                  ("temperature" in sent.get("body", {})) is takes, sent.get("body"))
+    finally:
+        A.requests.post, O.requests.post = saved
+
+
 def test_config_revision():
     print("\n=== Config revision ===")
     tmp = tempfile.mkdtemp()
@@ -1010,6 +1056,7 @@ if __name__ == "__main__":
     test_mood_and_expectations()
     test_workbench_and_budget()
     test_config()
+    test_temperature_only_where_it_is_taken()
     test_config_revision()
     test_notes_migrate_to_directive()
     test_energy_refill_and_door()
