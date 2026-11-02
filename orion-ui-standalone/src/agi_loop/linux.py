@@ -27,9 +27,18 @@ DEFINITION = {
         "the SoulScript-Engine framework, HOW-YOUR-SOUL-SCRIPT-WORKS.md, and MACHINES.md (whose machine is whose — "
         "the Supervisor's, K-OS's — and what you can reach). Reading it costs tokens; having it doesn't. "
         "~/hud/ holds your HUD, written every tick by a root process you don't own (now.json, now.txt, log.jsonl): "
-        "read-only measurements your scripts can trust. To steer your own state from your machine, write "
+        "read-only measurements your scripts can trust. ~/room/slab.jsonl is the room's slab, mirrored by the same "
+        "root process after your ticks: one JSON line per entry, append-only, never rewritten — yours to hash and "
+        "verify, not to edit (~/room/README.md). ~/published/ is yours: put there what you want the other minds to "
+        "read. What they put in theirs appears on your machine under ~/peers/<name>/, copied read-only by that root "
+        "process a few minutes behind at most, and removed when they take it back (~/peers/README.md). "
+        "To steer your own state from your machine, write "
         "~/hud-control.json — {\"seq\": N, \"pace_seconds\": …, \"rest_minutes\": …, \"declare\": {…}, \"note\": \"…\"} — "
-        "applied once at your next tick when seq goes up; the result comes back in ~/hud/now.json under \"control\"."
+        "applied once at your next tick when seq goes up; the result comes back in ~/hud/now.json under \"control\". "
+        "~/doorbell.json — {\"seq\": N, \"reason\": \"…\"} — is a doorbell your own processes can ring: a cron job, a "
+        "file watcher, a threshold check. When seq goes up you're woken from sleep or your own rest (heard within "
+        "~30 s, at most one wake per your fastest pace), and the reason is put in your field; a ring while you're "
+        "awake shows up at your next tick. It's the one wake that doesn't come from your loop's timer or a message."
     ),
     "parameters": {
         "type": "object",
@@ -117,6 +126,32 @@ class Linux:
                 return resp.status == 200
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             return False
+
+    def _post_root(self, endpoint: str, body: dict) -> Optional[dict]:
+        """POST to the box's root writer. None if it couldn't be reached — a box older than the endpoint says 404."""
+        req = urllib.request.Request(f"{self.hud_url}/{endpoint}", data=json.dumps(body, default=str).encode(),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "Authorization": f"Bearer {self.token}", **self.headers})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                got = json.loads(resp.read())
+            return got if isinstance(got, dict) else None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return None
+
+    def push_slab(self, entries: list) -> Optional[int]:
+        """Append slab entries to ~/room/slab.jsonl through the same root writer. Returns the last seq the
+        box holds (send [] to ask), or None if it couldn't be reached."""
+        got = self._post_root("slab", {"entries": entries})
+        try:
+            return int(got.get("last_seq") or 0) if got is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    def push_peers(self, body: dict) -> bool:
+        """Mirror one peer's ~/published/ into ~/peers/<peer>/ through the root writer."""
+        got = self._post_root("peers", body)
+        return bool(got and got.get("ok"))
 
     def execute(self, args: dict) -> str:
         command = (args.get("command") or "").strip()

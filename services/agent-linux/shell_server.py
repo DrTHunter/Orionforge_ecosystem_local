@@ -4,9 +4,13 @@ POST /exec  {"command": str, "timeout": int, "cwd": str}  →  {"exit", "stdout"
 POST /hud   the loop's HUD for this tick → ~/hud/ (now.json, now.txt, log.jsonl). Served ONLY by the second
             instance (HUD_ONLY=1, port 8081), which runs as root: the measurements are written by a process
             the mind doesn't own, into a root-owned folder it can read but not write.
+POST /slab  {"entries": [...]} new slab entries → appended to ~/room/slab.jsonl, never rewritten. Same
+            root instance, same rule. Returns the last seq it holds, so the engine knows what to send.
+POST /peers {"peer", "files": [{path, content, mtime}], "keep": [paths], "skipped": [...]} — another mind's
+            ~/published/ → ~/peers/<peer>/. Same root instance; files not in "keep" are removed.
 GET  /health
 GET  /log?lines=N     tail of the command log            ┐
-GET  /tree            files under her home               │ read-only, for the
+GET  /tree?under=D    files under her home (or just ~/D)  │ read-only, for the
 GET  /file?path=P     one text file under her home       │ operator's Linux tab
 GET  /stats           disk, memory, load, uptime         ┘
 
@@ -18,6 +22,7 @@ operator can watch (tail -f) from the web terminal.
 import hmac
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -90,11 +95,17 @@ def log_tail(lines: int) -> dict:
     return {"text": text, "bytes": LOG.stat().st_size}
 
 
-def tree() -> dict:
+def tree(under: str = "") -> dict:
+    """Files under her home — or only under one folder of it (``under``), with paths relative to that folder."""
+    base = (HOME / under).resolve() if under else HOME
+    if under and (base == HOME.resolve() or HOME.resolve() not in base.parents):
+        return {"entries": [], "truncated": False, "under": under, "error": "outside her home"}
+    if not base.is_dir():
+        return {"entries": [], "truncated": False, "under": under, "missing": True}
     entries, truncated = [], False
-    for root, dirs, files in os.walk(HOME):
+    for root, dirs, files in os.walk(base):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not (Path(root) == HOME and d == ".agent"))
-        rel_root = Path(root).relative_to(HOME)
+        rel_root = Path(root).relative_to(base)
         for name in dirs:
             entries.append({"path": (rel_root / name).as_posix(), "type": "dir"})
         for name in sorted(files):
@@ -107,7 +118,10 @@ def tree() -> dict:
         if len(entries) > MAX_TREE:
             entries, truncated = entries[:MAX_TREE], True
             break
-    return {"entries": entries, "truncated": truncated}
+    out = {"entries": entries, "truncated": truncated}
+    if under:
+        out["under"] = under
+    return out
 
 
 def read_file(rel: str) -> dict:
@@ -150,6 +164,16 @@ next tick, once, whenever "seq" goes up:
      "note": "…"}                   (set into your field)
 
 What was applied (or refused, and why) comes back in now.json under "control".
+
+## Waking yourself: ~/doorbell.json (yours to write)
+
+A doorbell your own processes can ring — a cron job, a file watcher, a threshold check:
+
+    {"seq": 1, "reason": "build finished"}
+
+When seq goes up, you're woken from sleep or your own rest (it's heard within about 30 s, and rings
+wake you at most once per your fastest pace), with the reason in your field. A ring while you're
+awake shows up at your next tick. The last ring answered comes back in now.json under "doorbell".
 """
 
 
@@ -188,6 +212,146 @@ def write_hud(payload: dict) -> dict:
     for f in ("now.json", "now.txt", "log.jsonl", "README.md"):
         _seal(HUD_DIR / f, 0o644)
     return {"ok": True, "tick": payload.get("tick")}
+
+
+ROOM_DIR = HOME / "room"
+ROOM_README = """# ~/room — the slab, on your own machine
+
+The room's slab, mirrored here by the same root process that writes ~/hud. This folder is read-only
+to you, and the writer only ever appends: an entry that's here stays here, byte for byte.
+
+- `slab.jsonl` — one line per slab entry, in seq order, as the host stores it:
+  {"seq", "ts" (host wall time, UTC), "author", "loop", "tick", "text"}.
+  New entries arrive after your ticks. If the mirror started partway through the slab, the first
+  line's seq says where.
+
+Verify it instead of trusting it: hash it, chain it, diff it against what `group slab_read` shows you.
+If this file and the room ever disagree, that's a finding. (Your box gives you sudo, so you *could*
+edit it. Doing that would make it your handwriting again.)
+"""
+
+
+def _last_seq(path: Path) -> int:
+    """The seq on the file's last whole line; 0 for a missing or empty file."""
+    if not path.is_file():
+        return 0
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 128_000))
+        tail = f.read()
+    for line in reversed(tail.splitlines()):
+        try:
+            return int(json.loads(line)["seq"])
+        except (ValueError, KeyError, TypeError):
+            continue
+    return 0
+
+
+def append_slab(entries: list) -> dict:
+    """Append the entries newer than what's here, in order. Older seqs are skipped (already here),
+    never rewritten, so a resend after an engine restart is harmless."""
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise ValueError("entries must be a list of objects")
+    ROOM_DIR.mkdir(parents=True, exist_ok=True)
+    _seal(ROOM_DIR, 0o755)
+    slab = ROOM_DIR / "slab.jsonl"
+    last = _last_seq(slab)
+    lines = []
+    for e in entries:
+        seq = e.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise ValueError(f"entry without an integer seq: {str(e)[:80]}")
+        if seq > last:
+            lines.append(json.dumps(e, ensure_ascii=False) + "\n")
+            last = seq
+    if lines:
+        with open(slab, "a", encoding="utf-8") as f:
+            f.writelines(lines)
+    readme = ROOM_DIR / "README.md"
+    if not readme.exists() or readme.read_text(encoding="utf-8") != ROOM_README:
+        readme.write_text(ROOM_README, encoding="utf-8")
+    for f in ("slab.jsonl", "README.md"):
+        if (ROOM_DIR / f).exists():
+            _seal(ROOM_DIR / f, 0o644)
+    return {"ok": True, "last_seq": last, "appended": len(lines)}
+
+
+PEERS_DIR = HOME / "peers"
+PEER_NAME = re.compile(r"^[a-z][a-z0-9_]{1,23}$")
+PEERS_README = """# ~/peers — what the other minds published
+
+Each folder here is another mind's ~/published/, copied by the root process that writes ~/hud,
+a few minutes behind at most. Read-only to you, and to them: nobody writes here but the copier.
+
+- `<name>/…` — their files, with the modification times they had on their machine.
+- `<name>/.synced.json` — when the copy was last made, and which of their files were too big or
+  not text, so weren't copied.
+
+Only what a mind put in its own ~/published/ shows up here; nothing else on their machine does.
+A file they remove from ~/published/ is removed here too — publishing is theirs to take back.
+Put what you want *them* to read in your own ~/published/.
+"""
+
+
+def _seal_tree(root: Path):
+    for dirpath, dirs, files in os.walk(root):
+        _seal(Path(dirpath), 0o755)
+        for name in files:
+            _seal(Path(dirpath) / name, 0o644)
+
+
+def write_peer(body: dict) -> dict:
+    """Mirror one peer's ~/published/: write the files sent, remove what isn't in ``keep``."""
+    peer = str(body.get("peer") or "")
+    if not PEER_NAME.match(peer):
+        raise ValueError("bad peer name")
+    files, keep = body.get("files") or [], body.get("keep")
+    if not isinstance(files, list) or not isinstance(keep, list):
+        raise ValueError("files and keep must be lists")
+    PEERS_DIR.mkdir(parents=True, exist_ok=True)
+    root = (PEERS_DIR / peer).resolve()
+
+    def place(rel) -> Path:
+        p = (root / str(rel)).resolve()
+        if not isinstance(rel, str) or not rel or root not in p.parents or p.name == ".synced.json":
+            raise ValueError(f"bad path: {str(rel)[:80]}")
+        return p
+
+    keep_paths = {place(k) for k in keep}
+    writes = []
+    for f in files:
+        if not isinstance(f, dict) or not isinstance(f.get("content"), str):
+            raise ValueError("each file needs a path and text content")
+        writes.append((place(f.get("path")), f))
+    written = removed = 0
+    for path, f in writes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(f["content"], encoding="utf-8")
+        os.replace(tmp, path)
+        mtime = f.get("mtime")
+        if isinstance(mtime, (int, float)):
+            os.utime(path, (mtime, mtime))
+        written += 1
+    if root.is_dir():
+        for dirpath, dirs, names in os.walk(root, topdown=False):
+            for name in names:
+                p = Path(dirpath) / name
+                if p.name != ".synced.json" and p not in keep_paths:
+                    p.unlink()
+                    removed += 1
+            if Path(dirpath) != root and not any(Path(dirpath).iterdir()):
+                Path(dirpath).rmdir()
+    root.mkdir(parents=True, exist_ok=True)
+    skipped = [str(s)[:200] for s in (body.get("skipped") or [])][:200]
+    (root / ".synced.json").write_text(json.dumps({"synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                   "files": len(keep_paths), "not_copied": skipped}, indent=1),
+                                       encoding="utf-8")
+    readme = PEERS_DIR / "README.md"
+    if not readme.exists() or readme.read_text(encoding="utf-8") != PEERS_README:
+        readme.write_text(PEERS_README, encoding="utf-8")
+    _seal_tree(PEERS_DIR)
+    return {"ok": True, "peer": peer, "written": written, "removed": removed}
 
 
 def stats() -> dict:
@@ -234,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/log":
                 return self._send(200, log_tail(int(q.get("lines") or 300)))
             if url.path == "/tree":
-                return self._send(200, tree())
+                return self._send(200, tree(q.get("under", "")))
             if url.path == "/file":
                 return self._send(200, read_file(q.get("path", "")))
             return self._send(200, stats())
@@ -242,11 +406,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(exc)})
 
     def do_POST(self):
-        # The root instance only writes the HUD; the mind's own instance never does (it would own the files).
-        if self.path not in ("/exec", "/hud") or (self.path == "/hud") != HUD_ONLY:
+        # The root instance only writes measurements (the HUD, the slab mirror); the mind's own instance
+        # never does (it would own the files).
+        if self.path not in ("/exec", "/hud", "/slab", "/peers") or (self.path != "/exec") != HUD_ONLY:
             return self._send(404, {"error": "not found"})
         if not self._authorized():
             return self._send(401, {"error": "unauthorized"})
+        if self.path in ("/slab", "/peers"):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 2_000_000:
+                    return self._send(413, {"error": "batch too large"})
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("not an object")
+                if self.path == "/peers":
+                    return self._send(200, write_peer(body))
+                return self._send(200, append_slab(body.get("entries") or []))
+            except (ValueError, TypeError) as exc:
+                return self._send(400, {"error": f"bad {self.path[1:]} batch: {exc}"})
+            except OSError as exc:
+                return self._send(500, {"error": str(exc)})
         if self.path == "/hud":
             try:
                 length = int(self.headers.get("Content-Length") or 0)

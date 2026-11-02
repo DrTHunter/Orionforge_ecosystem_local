@@ -12355,7 +12355,68 @@ def test_agi_loop_hud_on_linux_and_local_day():
               and all(json.loads(l) for l in trimmed))
         check("a wrong token makes push_hud return False, not raise", Linux(f"http://127.0.0.1:{port}", "bad", "t").push_hud(payload) is False)
         check("an unreachable box returns False, quickly", Linux("http://127.0.0.1:9", "x", "t").push_hud(payload) is False)
+
+        # ~/room/slab.jsonl — the slab mirror, append-only, written by the same root writer
+        room = Path(home) / "room"
+        check("asking an empty mirror what it holds → 0", linux.push_slab([]) == 0)
+        e = lambda n, t="x": {"seq": n, "ts": "2026-11-01T00:00:00+00:00", "author": "k_os", "loop": "k_os", "tick": n, "text": t}
+        check("entries append, and the box says the last seq it holds", linux.push_slab([e(1, "the seam ✶"), e(2)]) == 2)
+        lines = (room / "slab.jsonl").read_text(encoding="utf-8").splitlines()
+        check("…one JSON line per entry, as sent, unicode intact",
+              [json.loads(l) for l in lines] == [e(1, "the seam ✶"), e(2)] and "✶" in lines[0])
+        check("a resend is skipped, never rewritten (an engine restart is harmless)",
+              linux.push_slab([e(1, "forged"), e(2, "forged"), e(3)]) == 3
+              and (room / "slab.jsonl").read_text(encoding="utf-8").splitlines()[:2] == lines)
+        check("out-of-order seqs in a batch are dropped, not written", linux.push_slab([e(5), e(4), e(6)]) == 6
+              and [json.loads(l)["seq"] for l in (room / "slab.jsonl").read_text(encoding="utf-8").splitlines()] == [1, 2, 3, 5, 6])
+        check("an entry without an integer seq → 400, nothing written",
+              post("/slab", {"entries": [e(7), {"seq": "8"}]})[0] == 400 and S._last_seq(room / "slab.jsonl") == 6)
+        check("not a list of objects → 400", post("/slab", {"entries": "x"})[0] == 400)
+        check("no token → 401", post("/slab", {"entries": []}, token="wrong")[0] == 401)
+        check("~/room/README.md says what it is and that it's append-only",
+              "only ever appends" in (room / "README.md").read_text(encoding="utf-8"))
+        check("a mirror that can't be reached says None, not raises", Linux("http://127.0.0.1:9", "x", "t").push_slab([]) is None)
+
+        # ~/peers/<name>/ — another mind's ~/published/, copied by the root writer
+        peers = Path(home) / "peers"
+        ok = linux.push_peers({"peer": "k_os", "files": [{"path": "notes.md", "content": "K's ✶ notes", "mtime": 1_700_000_000},
+                                                         {"path": "deep/spine.txt", "content": "spine"}],
+                               "keep": ["notes.md", "deep/spine.txt"], "skipped": ["photo.png: binary file"]})
+        check("a peer's published files land under ~/peers/<name>/", ok and (peers / "k_os" / "notes.md").read_text(encoding="utf-8")
+              == "K's ✶ notes" and (peers / "k_os" / "deep" / "spine.txt").read_text(encoding="utf-8") == "spine")
+        check("…keeping the modification time they had on their machine", int((peers / "k_os" / "notes.md").stat().st_mtime) == 1_700_000_000)
+        synced = json.loads((peers / "k_os" / ".synced.json").read_text(encoding="utf-8"))
+        check("…with a note of when, and what wasn't copied", synced["files"] == 2 and synced["not_copied"] == ["photo.png: binary file"]
+              and synced["synced_at"].endswith("Z"))
+        check("~/peers/README.md says only what they published shows up", "Only what a mind put in its own ~/published/"
+              in (peers / "README.md").read_text(encoding="utf-8"))
+        linux.push_peers({"peer": "k_os", "files": [], "keep": ["notes.md"]})
+        check("a file they take back is removed here too, and its empty folder", (peers / "k_os" / "notes.md").exists()
+              and not (peers / "k_os" / "deep").exists())
+        for bad, why in (({"peer": "../etc", "files": [], "keep": []}, "a bad peer name"),
+                         ({"peer": "k_os", "files": [{"path": "../../.bashrc", "content": "x"}], "keep": []}, "a path out of their folder"),
+                         ({"peer": "k_os", "files": [{"path": "/etc/passwd", "content": "x"}], "keep": []}, "an absolute path"),
+                         ({"peer": "k_os", "files": [], "keep": ["../madara/x"]}, "a keep path out of their folder"),
+                         ({"peer": "k_os", "files": [{"path": ".synced.json", "content": "{}"}], "keep": []}, "overwriting the copier's note"),
+                         ({"peer": "k_os", "files": [{"path": "a.md", "content": 5}], "keep": []}, "content that isn't text")):
+            check(f"/peers refuses {why} → 400, nothing touched", post("/peers", bad)[0] == 400
+                  and (peers / "k_os" / "notes.md").exists() and not (Path(home) / ".bashrc").exists())
+        check("/peers needs the token", post("/peers", {"peer": "k_os", "files": [], "keep": []}, token="wrong")[0] == 401)
         S.HUD_ONLY = False
+        check("the mind's own command server refuses /peers", post("/peers", {"peer": "k_os", "files": [], "keep": []})[0] == 404
+              and (peers / "k_os" / "notes.md").exists())
+        (Path(home) / "published" / "sub").mkdir(parents=True)
+        (Path(home) / "published" / "a.md").write_text("hi", encoding="utf-8")
+        (Path(home) / "published" / "sub" / "b.md").write_text("there", encoding="utf-8")
+        only = linux.read("tree", under="published")
+        check("/tree?under=published lists only that folder, paths relative to it", only["under"] == "published"
+              and sorted(e["path"] for e in only["entries"] if e["type"] == "file") == ["a.md", "sub/b.md"])
+        check("…and says so when the folder isn't there", linux.read("tree", under="nothing")["missing"] is True)
+        check("…and never lists outside her home", linux.read("tree", under="../..")["entries"] == []
+              and linux.read("tree", under="..")["error"] == "outside her home")
+        check("/tree without under still lists the whole home, unmarked", "under" not in linux.read("tree"))
+        check("the mind's own command server refuses /slab", post("/slab", {"entries": [e(9)]})[0] == 404
+              and S._last_seq(room / "slab.jsonl") == 6)
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         c.request("POST", "/exec", body=b"{}", headers={"Authorization": "Bearer tok-test", "Content-Length": "2"})
         check("the mind's own server still runs /exec", c.getresponse().status == 400)
@@ -12389,6 +12450,140 @@ def test_agi_loop_hud_on_linux_and_local_day():
         none.running = True
         asyncio.run(none.tick())
         check("a mind without a machine just doesn't push", none.linux is None)
+
+        # the slab follows the HUD onto her machine, oldest first, in batches
+        from src.agi_loop.groupchat import Slab
+        class Room:
+            slab = Slab(Path(tmp) / "room" / "slab.jsonl")
+        for i in range(1, 251):
+            Room.slab.write("k_os", "k_os", i, f"entry {i}")
+        class MirrorBox:
+            def __init__(self, held=0, up=True):
+                self.held, self.up, self.batches = held, up, []
+            def push_hud(self, p):
+                return True
+            def push_slab(self, entries):
+                if not self.up:
+                    return None
+                self.batches.append([x["seq"] for x in entries])
+                self.held = max([self.held] + [x["seq"] for x in entries])
+                return self.held
+        box = MirrorBox()
+        m = _torture_loop(tmp, sub="mirror")
+        m.linux, m.group = box, Room()
+        m._push_box({"tick": 1})
+        check("the first sync asks the box what it holds, then sends the rest oldest first",
+              box.batches[0] == [] and box.batches[1][:2] == [1, 2] and box.held == 250, box.batches[:2])
+        check("…in batches of at most 100", [len(b) for b in box.batches[1:]] == [100, 100, 50])
+        Room.slab.write("madara", "madara", 9, "new one")
+        box.batches.clear()
+        m._push_box({"tick": 2})
+        check("after that, a tick sends only what's new", box.batches == [[251]], box.batches)
+        again = MirrorBox(held=251)
+        m2 = _torture_loop(tmp, sub="mirror2")
+        m2.linux, m2.group = again, Room()
+        m2._push_box({"tick": 1})
+        check("after an engine restart it asks again and resends nothing it already has", again.batches == [[]])
+        down = MirrorBox(up=False)
+        m3 = _torture_loop(tmp, sub="mirror3")
+        m3.linux, m3.group = down, Room()
+        m3._push_box({"tick": 1})
+        check("a box that's down or too old for the mirror is left alone, and asked again next tick",
+              m3._box_slab_seq is None and down.batches == [])
+        lone = _torture_loop(tmp, sub="lone")
+        lone.linux = MirrorBox()
+        lone._push_box({"tick": 1})
+        check("a loop that isn't in a room has no slab to mirror", lone.linux.batches == [])
+
+        # each mind's ~/published/ is copied onto the others' machines
+        class PeerBox(Linux):
+            def __init__(self, files, under=True, headers=None):
+                super().__init__("http://peer:8080", "t", "kos", headers=headers)
+                self.files, self.under, self.reads = files, under, []
+            def read(self, endpoint, **params):
+                self.reads.append((endpoint, params))
+                if endpoint == "tree":
+                    out = {"entries": [{"path": p, "type": "file", "mtime": m, "bytes": len(c or "")} for p, (c, m) in self.files.items()]}
+                    return dict(out, under=params.get("under")) if self.under else out
+                rel = params["path"][len("published/"):]
+                c, _ = self.files[rel]
+                if c is None:
+                    return {"ok": False, "reason": "binary file (9 bytes)"}
+                return {"ok": True, "content": c, "truncated": len(c) > 50}
+        class OwnBox(Linux):
+            def __init__(self, headers=None):
+                super().__init__("http://own:8080", "t", "elysia", headers=headers)
+                self.sent = []
+            def push_hud(self, p):
+                return True
+            def push_slab(self, entries):
+                return 0
+            def push_peers(self, body):
+                self.sent.append(body)
+                return True
+        kbox = PeerBox({"notes.md": ("K's notes", 1.0), "img.png": (None, 1.0), "huge.log": ("z" * 60, 1.0)})
+        mbox = PeerBox({"spec.md": ("Madara's spec", 2.0)})
+        ub = PeerBox({"x.md": ("a user's box", 1.0)}, headers={"fly-force-instance-id": "abc"})
+        me = _torture_loop(tmp, sub="peers-me", loop_id="elysia")
+        k, mad, usr = (_torture_loop(tmp, sub=f"peers-{n}", loop_id=n) for n in ("k_os", "madara", "night_owl"))
+        k.linux, mad.linux, usr.linux = kbox, mbox, ub
+        class Room2:
+            slab = Slab(Path(tmp) / "room2" / "slab.jsonl")
+            def _loops(self):
+                return {"elysia": me, "k_os": k, "madara": mad, "night_owl": usr, "no_box": _torture_loop(tmp, sub="nb")}
+        me.linux, me.group = OwnBox(), Room2()
+        me._push_box({"tick": 1})
+        sent = {b["peer"]: b for b in me.linux.sent}
+        check("every other mind with a machine is copied, never itself", set(sent) == {"k_os", "madara"}, set(sent))
+        check("their box is asked for ~/published only", all(r == ("tree", {"under": "published"}) for r in kbox.reads[:1]))
+        check("text files are copied with their times", [(f["path"], f["content"], f["mtime"]) for f in sent["k_os"]["files"]]
+              == [("notes.md", "K's notes", 1.0)] and sent["madara"]["files"][0]["content"] == "Madara's spec")
+        check("binary and too-big files aren't copied, and the note says why",
+              sorted(sent["k_os"]["skipped"]) == ["huge.log: over 200 KB", "img.png: binary file (9 bytes)"]
+              and sent["k_os"]["keep"] == ["notes.md"])
+        check("a user's box is never read (waking it costs them)", ub.reads == [])
+        me.linux.sent.clear()
+        kbox.reads.clear()
+        me._push_box({"tick": 2})
+        check("within the sync interval nothing is re-read", me.linux.sent == [] and kbox.reads == [])
+        me._peers_synced_at = 0
+        me._push_box({"tick": 3})
+        check("after it, an unchanged peer is only listed, not re-copied", me.linux.sent == []
+              and [r[0] for r in kbox.reads] == ["tree"])
+        kbox.files["notes.md"] = ("K's notes, revised", 5.0)
+        kbox.files["new.md"] = ("new", 5.0)
+        del kbox.files["img.png"]
+        me._peers_synced_at = 0
+        me._push_box({"tick": 4})
+        body = {b["peer"]: b for b in me.linux.sent}["k_os"]
+        check("a change copies only what changed", sorted((f["path"], f["content"]) for f in body["files"])
+              == [("new.md", "new"), ("notes.md", "K's notes, revised")])
+        check("…and a file they took back leaves the keep list (so it's removed)", sorted(body["keep"]) == ["new.md", "notes.md"]
+              and body["skipped"] == ["huge.log: over 200 KB"])
+        me.linux.sent.clear()
+        me.PEER_BATCH_BYTES = 10
+        kbox.files.update({"a.md": ("aaaaaaaa", 9.0), "b.md": ("bbbbbbbb", 9.0), "notes.md": ("K's notes, third", 9.0)})
+        me._peers_synced_at = 0
+        me._push_box({"tick": 5})
+        body = me.linux.sent[-1]
+        check("a big change goes over in batches; the older copy of a changed file stays till its turn",
+              [f["path"] for f in body["files"]] == ["a.md"] and "notes.md" in body["keep"] and "b.md" not in body["keep"], body)
+        me._peers_synced_at = 0
+        me._push_box({"tick": 6})
+        check("…and the next copy carries on", [f["path"] for f in me.linux.sent[-1]["files"]] == ["b.md"])
+        me.PEER_BATCH_BYTES = 1_500_000
+        old = _torture_loop(tmp, sub="peers-old", loop_id="elysia")
+        old.linux, old.group = OwnBox(), Room2()
+        k.linux = PeerBox({"notes.md": ("x", 1.0)}, under=False)
+        mad.linux = None
+        old._push_box({"tick": 1})
+        check("a peer box too old for ?under= is never mirrored (it would list its whole home)", old.linux.sent == [])
+        ubme = _torture_loop(tmp, sub="peers-user", loop_id="night_owl")
+        ubme.linux, ubme.group = OwnBox(headers={"fly-force-instance-id": "x"}), Room2()
+        ubme._push_box({"tick": 1})
+        check("a user's own box doesn't mirror peers yet", ubme.linux.sent == [])
+        check("each mind is told about ~/published and ~/peers", "~/published/ is yours" in DEFINITION["description"]
+              and "~/peers/<name>/" in DEFINITION["description"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     check("each mind is told about ~/hud and who writes it", "~/hud/ holds your HUD, written every tick by a root process you don't own"
@@ -12468,14 +12663,77 @@ def test_agi_loop_hud_on_linux_and_local_day():
         e.running = True
         asyncio.run(e.tick())
         check("a box that's down doesn't stop the tick", e.ticks.items and e.control_ack is None)
+
+        # ~/doorbell.json — her own processes can wake her
+        def nap(d, *a, **k):   # each asyncio.run is a new event loop; the wake event binds to one
+            d._wake = asyncio.Event()
+            asyncio.run(d._sleep(*a, **k))
+
+        bell = Box()
+        b = _torture_loop(tmp, sub="bell", min_interval_seconds=20, max_interval_seconds=1800)
+        b.linux, b.running, b.DOORBELL_POLL = bell, True, 0.05
+        nap(b, 0.3)
+        check("no doorbell file → she sleeps the whole way", b.wake_reason == "timer" and b.last_sleep["slept"] >= 0.29)
+        bell.files["doorbell.json"] = json.dumps({"seq": 1, "reason": "build   finished"})
+        t0 = time.time()
+        nap(b, 30)
+        check("a ring wakes her from sleep, within a listen", b.wake_reason == "doorbell" and time.time() - t0 < 2,
+              (b.wake_reason, time.time() - t0))
+        asyncio.run(b.tick())
+        rung = [i.text for i in b.world.items.values() if i.key == "doorbell:1"]
+        check("the ring and its reason are put in her field", rung == ["your machine rang the doorbell (~/doorbell.json seq 1): build finished"], rung)
+        check("…the HUD says her machine woke her", "Your own machine rang you awake" in b.ticks.tail(1)[0]["view"])
+        check("…a ring always gets a thought (never gated)", not b.ticks.tail(1)[0].get("gated"))
+        check("…and it's answered once", b.doorbell_seq == 1 and b.doorbell_ack["woke_you"] is True)
+        b._doorbell_woke_at = 0
+        nap(b, 0.3)
+        check("an answered ring doesn't wake her again", b.wake_reason == "timer")
+        bell.files["doorbell.json"] = json.dumps({"seq": 2, "reason": "again"})
+        b._doorbell_woke_at = time.time()
+        nap(b, 0.3)
+        check("rings wake her at most once per her fastest pace (a stuck script can't keep her up)", b.wake_reason == "timer")
+        asyncio.run(b.tick())
+        check("…that ring still reaches her, at the next tick, marked as such",
+              any(i.key == "doorbell:2" and "while you were already awake" in i.text for i in b.world.items.values())
+              and b.doorbell_ack == {"seq": 2, "at": b.doorbell_ack["at"], "woke_you": False})
+        bell.files["doorbell.json"] = json.dumps({"seq": 3})
+        b._doorbell_woke_at = 0
+        nap(b, 30, rest_reason="tired")
+        check("a ring wakes her from her own rest", b.wake_reason == "rest_doorbell")
+        asyncio.run(b.tick())
+        check("…with no reason, it says so", any(i.key == "doorbell:3" and i.text.endswith("with no reason given")
+                                                 for i in b.world.items.values()))
+        bell.files["doorbell.json"] = json.dumps({"seq": 4})
+        b._doorbell_woke_at = 0
+        nap(b, 0.3, wake_on_message=False)
+        check("an exhausted sleep hears no doorbell", b.wake_reason == "timer")
+        bell.files["doorbell.json"] = "{nope"
+        asyncio.run(b.tick())
+        check("a broken doorbell file is reported back, not rung", "isn't valid JSON" in b.doorbell_ack.get("error", "")
+              and b.doorbell_seq == 3)
+        check("the last ring answered rides in the HUD on her machine",
+              b.hud_payload("", time.time())["doorbell_file"] == "~/doorbell.json" and "doorbell" in b.hud_payload("", time.time()))
+        b.save()
+        check("the answered seq survives a restart (no ring replayed)", _torture_loop(tmp, sub="bell").doorbell_seq == 3)
+        down = _torture_loop(tmp, sub="bell-down")
+        down.linux, down.running, down.DOORBELL_POLL = DownBox(), True, 0.05
+        nap(down, 0.3)
+        check("a box that's down rings nothing and doesn't break sleep", down.wake_reason == "timer")
+        ubell = _torture_loop(tmp, sub="bell-user")
+        ubell.linux = Linux("http://u:8080", "t", "agent", headers={"fly-force-instance-id": "x"})
+        check("a user's box isn't listened to (asking would wake it, at their cost)", ubell._doorbell_on() is False)
+        check("each mind is told about the doorbell", "~/doorbell.json" in DEFINITION["description"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     srv = Path(__file__).resolve().parent.parent.parent / "services" / "agent-linux"
     start = (srv / "start.sh").read_text(encoding="utf-8")
     check("boot starts the root HUD writer on :8081", "HUD_ONLY=1 PORT=8081" in start
           and "python3 /opt/agent/shell_server.py &" in start)
-    check("boot never hands ~/library or ~/hud back to the mind",
-          '-path "$HOME_DIR/library" -o -path "$HOME_DIR/hud"' in start and "-prune" in start and "chown -R" not in start)
+    check("boot never hands ~/library, ~/hud, ~/room or ~/peers back to the mind",
+          '-path "$HOME_DIR/library" -o -path "$HOME_DIR/hud" -o -path "$HOME_DIR/room" -o -path "$HOME_DIR/peers"' in start
+          and "-prune" in start and "chown -R" not in start)
+    check("…and gives every mind a ~/published/ of its own", 'mkdir -p "$HOME_DIR/published"' in start)
+    check("each mind is told about the slab mirror on its machine", "~/room/slab.jsonl" in DEFINITION["description"])
     check("the mind's own server runs without HUD_ONLY", "env -u HUD_ONLY" in start and "PORT=8080" in start)
     check("the image exposes the HUD writer's port", "EXPOSE 8080 8081 7681" in (srv / "Dockerfile").read_text(encoding="utf-8"))
 

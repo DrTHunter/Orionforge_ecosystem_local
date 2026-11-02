@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from collections import deque
@@ -203,6 +204,11 @@ class LoopDaemon:
         self.group = group   # the shared room (groupchat.GroupChat), if this loop is in one
         # The owner's loops find their machine by id (env); a user's loop is handed its own box, or none.
         self.linux = linux if isinstance(linux, Linux) else (Linux.from_env(loop_id) if linux else None)
+        self._box_slab_seq: Optional[int] = None   # the last slab seq her machine's mirror holds; None = ask it
+        self._box_sync = threading.Lock()
+        self._peer_seen: Dict[str, Dict[str, tuple]] = {}   # per peer: {path: (mtime, bytes)} already on her box
+        self._peer_skips: Dict[str, Dict[str, str]] = {}    # per peer: {path: why it wasn't copied}
+        self._peers_synced_at = 0.0
         self.channels = list(DEFAULT_CHANNELS)
         self.tools = LoopTools(self)
 
@@ -259,6 +265,9 @@ class LoopDaemon:
         self.handoff_seen: dict = saved.get("handoff_seen") or {}   # the letter already shown after a restart
         self.control_seq: int = int(saved.get("control_seq") or 0)   # last ~/hud-control.json seq applied
         self.control_ack: Optional[dict] = saved.get("control_ack")
+        self.doorbell_seq: int = int(saved.get("doorbell_seq") or 0)   # last ~/doorbell.json ring answered
+        self.doorbell_ack: Optional[dict] = saved.get("doorbell_ack")
+        self._doorbell_woke_at = 0.0   # wall time a ring last woke her (rings are rate-limited)
         self.gate_on: bool = saved.get("gate_on", True) is not False   # the mind's own switch for the quiet gate
         self.llm_choice: str = saved.get("llm_choice") or ""   # the mind's own default for the llm tool
         self.gated_streak = 0      # quiet wakes slept through since the last thought
@@ -297,6 +306,7 @@ class LoopDaemon:
                                             "stopped_at": self.stopped_at, "stop_reason": self.stop_reason,
                                             "handoff_seen": self.handoff_seen,
                                             "control_seq": self.control_seq, "control_ack": self.control_ack,
+                                            "doorbell_seq": self.doorbell_seq, "doorbell_ack": self.doorbell_ack,
                                             "gate_on": self.gate_on, "llm_choice": self.llm_choice})
         except OSError as exc:
             log.warning("[agi_loop] save failed: %s", exc)
@@ -599,13 +609,17 @@ class LoopDaemon:
             self.phase = "resting" if rest_reason else "sleeping"
         slept_from = time.time()
         self.next_wake_at = slept_from + seconds
+        listen = wake_on_message and self._doorbell_on()   # an exhausted sleep hears no doorbell either
         with self._stage("sleep") as p:
             reason = "timer"
             while self.running and not self.paused:
                 remaining = self.next_wake_at - time.time()
                 if remaining <= 0:
                     break
-                cause = await self._wait(remaining)
+                cause = await self._wait(min(remaining, self.DOORBELL_POLL) if listen else remaining)
+                if cause is None and listen and await self._doorbell_rang():
+                    reason = "doorbell"
+                    break
                 if cause == "message" and wake_on_message:
                     reason = "message"
                     break
@@ -618,6 +632,8 @@ class LoopDaemon:
         self.wake_reason = ("rest_" + reason) if rest_reason else reason
         if reason == "message":
             self.event("wake", "a message at the door woke you" + (" from rest" if rest_reason else ""))
+        if reason == "doorbell":
+            self.event("wake", "your machine rang the doorbell" + (" during rest" if rest_reason else ""))
         self.next_wake_at = None
         self.resting = None
 
@@ -639,6 +655,8 @@ class LoopDaemon:
                     f"Your field, bench, notes and the room were kept; the thought you were in the middle of was not.")
         if r.endswith("message"):
             return "Someone at the door woke you" + (" from your rest." if r.startswith("rest_") else ".")
+        if r.endswith("doorbell"):
+            return "Your own machine rang you awake (~/doorbell.json)" + (" from your rest." if r.startswith("rest_") else ".")
         if r.startswith("rest_"):
             return f"You wake from rest after {fmt_age(gap or 0)}."
         if r == "poke":
@@ -718,6 +736,8 @@ class LoopDaemon:
 
         if self.linux:
             await self._apply_control()
+        if self._doorbell_on():
+            await self._answer_doorbell()
 
         with self._stage("sense") as p:
             new_msgs, self.queue = list(self.queue), []
@@ -956,6 +976,8 @@ class LoopDaemon:
             "declared": self.declared,
             "control": self.control_ack,   # what the last ~/hud-control.json did (or refused)
             "control_file": "~/hud-control.json",
+            "doorbell": self.doorbell_ack,   # the last ring answered, and whether it woke her
+            "doorbell_file": "~/doorbell.json",
             # The numbers above are read from the live budget after this tick's spend (current as of
             # at_utc); hud_lines are the HUD as the mind saw it when this tick began.
             "hud_lines": lines,
@@ -1021,11 +1043,149 @@ class LoopDaemon:
         self.event("control", f"~/hud-control.json seq {seq}: " + ("; ".join(applied) or "nothing applied")
                    + (f" (refused: {'; '.join(refused)})" if refused else ""))
 
+    DOORBELL_FILE = "doorbell.json"
+    DOORBELL_POLL = 30.0   # seconds between listens while she sleeps
+
+    def _doorbell_on(self) -> bool:
+        """The owner's machines only: a user's box stops while its mind sleeps, and asking would wake it."""
+        return bool(self.linux) and not getattr(self.linux, "headers", None)
+
+    def _read_doorbell(self) -> Optional[Tuple[int, str]]:
+        """(seq, reason) from ~/doorbell.json, or None when there's no readable ring."""
+        try:
+            got = self.linux.read("file", path=self.DOORBELL_FILE)
+        except Exception:
+            return None   # box down: no ring heard
+        if not got.get("ok"):
+            return None
+        try:
+            ring = json.loads(got.get("content") or "{}")
+            return int(ring.get("seq") or 0), " ".join(str(ring.get("reason") or "").split())[:300]
+        except (ValueError, TypeError, AttributeError):
+            self.doorbell_ack = {"at": _iso(), "error": "~/doorbell.json isn't valid JSON with a numeric seq"}
+            return None
+
+    async def _doorbell_rang(self) -> bool:
+        """Has the seq gone up since the last ring she was shown? At most one wake per min interval —
+        a script stuck ringing can't keep her awake faster than her own fastest pace."""
+        if time.time() - self._doorbell_woke_at < max(self.DOORBELL_POLL, self.config.min_interval_seconds):
+            return False
+        ring = await asyncio.to_thread(self._read_doorbell)
+        if ring and ring[0] > self.doorbell_seq:
+            self._doorbell_woke_at = time.time()
+            return True
+        return False
+
+    async def _answer_doorbell(self):
+        """At the top of a tick: a ring she hasn't been shown goes into her field, with its reason —
+        whether it woke her or arrived while she was already up."""
+        ring = await asyncio.to_thread(self._read_doorbell)
+        if not ring or ring[0] <= self.doorbell_seq:
+            return
+        seq, why = ring
+        woke = self.wake_reason.endswith("doorbell")
+        self.doorbell_seq = seq
+        self.doorbell_ack = {"seq": seq, "at": _iso(), "woke_you": woke}
+        text = (f"your machine rang the doorbell (~/doorbell.json seq {seq})" + (f": {why}" if why else ", with no reason given")
+                + ("" if woke else " — while you were already awake"))
+        self.world.upsert(f"doorbell:{seq}", "note", "machine", text, gist=_clip(f"doorbell: {why or 'rang'}", 48),
+                          salience=0.8, valence=0.0)
+        self.event("doorbell", f"seq {seq}" + (f": {_clip(why, 100)}" if why else ""))
+
     def _push_hud(self, view: str, now: float):
         """Off the event loop and never awaited: a slow box can't hold up a mind."""
-        import threading
         payload = self.hud_payload(view, now)
-        threading.Thread(target=self.linux.push_hud, args=(payload,), daemon=True).start()
+        threading.Thread(target=self._push_box, args=(payload,), daemon=True).start()
+
+    def _push_box(self, payload: dict):
+        self.linux.push_hud(payload)
+        if self.group is not None and hasattr(self.linux, "push_slab"):
+            self._sync_slab()
+        if self.group is not None and hasattr(self.linux, "push_peers") \
+                and time.time() - self._peers_synced_at >= self.PEER_SYNC_SECONDS:
+            self._sync_peers()
+
+    SLAB_BATCH = 100
+
+    def _sync_slab(self):
+        """Bring ~/room/slab.jsonl on her machine up to the room's slab, oldest first, in batches.
+        One sync at a time; one that's busy or fails just leaves it for the next tick."""
+        if not self._box_sync.acquire(blocking=False):
+            return
+        try:
+            if self._box_slab_seq is None:
+                self._box_slab_seq = self.linux.push_slab([])
+            while self._box_slab_seq is not None:
+                since = self._box_slab_seq
+                batch = [e for e in list(self.group.slab.log.items) if e.get("seq", 0) > since][:self.SLAB_BATCH]
+                if not batch:
+                    break
+                got = self.linux.push_slab(batch)
+                if got is None or got <= since:
+                    self._box_slab_seq = None if got is None else got
+                    break
+                self._box_slab_seq = got
+        finally:
+            self._box_sync.release()
+
+    PEER_SYNC_SECONDS = 300
+    PEER_MAX_FILES = 200
+    PEER_BATCH_BYTES = 1_500_000
+
+    def _sync_peers(self):
+        """Copy each other mind's ~/published/ onto this mind's machine (~/peers/<loop>/), changed files only.
+        Read-only views of their boxes; only the owner's machines (a user's box costs money to wake)."""
+        if getattr(self.linux, "headers", None) or not self._box_sync.acquire(blocking=False):
+            return
+        try:
+            self._peers_synced_at = time.time()
+            try:
+                peers = {lid: d for lid, d in self.group._loops().items() if lid != self.loop_id}
+            except Exception as exc:
+                log.warning("[agi_loop] peer list failed: %s", exc)
+                return
+            for lid, peer in peers.items():
+                box = getattr(peer, "linux", None)
+                if not isinstance(box, Linux) or box.headers:
+                    continue
+                try:
+                    self._sync_peer(lid, box)
+                except Exception as exc:   # their box down, ours down: try again next time
+                    log.info("[agi_loop] peer %s not mirrored: %s", lid, exc)
+        finally:
+            self._box_sync.release()
+
+    def _sync_peer(self, lid: str, box: Linux):
+        listing = box.read("tree", under="published")
+        if listing.get("under") != "published":
+            return   # a box older than ?under= would list its whole home: never mirror that
+        cur = {e["path"]: (e.get("mtime"), e.get("bytes")) for e in listing.get("entries", [])
+               if e.get("type") == "file"}
+        cur = dict(sorted(cur.items())[:self.PEER_MAX_FILES])
+        seen = self._peer_seen.get(lid) or {}
+        if lid in self._peer_seen and seen == cur:
+            return   # nothing published, changed or removed since the last copy
+        done = {p: v for p, v in seen.items() if cur.get(p) == v}
+        skips = {p: why for p, why in self._peer_skips.get(lid, {}).items() if p in done}
+        files, used = [], 0
+        for path in (p for p in cur if p not in done):
+            got = box.read("file", path=f"published/{path}")
+            if not got.get("ok") or got.get("truncated"):
+                skips[path] = got.get("reason") or "over 200 KB"
+                done[path] = cur[path]
+                continue
+            size = len(got["content"].encode("utf-8"))
+            if files and used + size > self.PEER_BATCH_BYTES:
+                break   # the rest go with the next copy; an older copy of a changed file stays till then
+            files.append({"path": path, "content": got["content"], "mtime": cur[path][0]})
+            skips.pop(path, None)
+            done[path] = cur[path]
+            used += size
+        sent = {f["path"] for f in files}
+        keep = [p for p in cur if (p in sent or p in seen) and p not in skips]
+        if self.linux.push_peers({"peer": lid, "files": files, "keep": keep,
+                                  "skipped": [f"{p}: {why}" for p, why in sorted(skips.items())]}):
+            self._peer_seen[lid], self._peer_skips[lid] = done, skips
 
     async def _think(self, view: str) -> dict:
         c = self.config
