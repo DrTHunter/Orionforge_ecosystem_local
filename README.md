@@ -123,6 +123,8 @@ Every chat message passes through a six-layer prompt assembly pipeline:
 5. **Conversation history** — recent turns, within a character budget
 6. **Tools** — per-agent tool schemas from the profile's `allowed_tools`; authorization is enforced at execution time
 
+The soul script sections and memories retrieved for a message are placed in that message rather than the system prompt. Everything above them stays the same from turn to turn, so providers can serve it from their prompt cache.
+
 Agents can save memories during conversation with `[MEMORY_SAVE: ...]` tags.
 
 ## AGI Loop — minds that keep running (optional)

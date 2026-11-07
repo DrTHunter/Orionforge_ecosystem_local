@@ -2035,10 +2035,10 @@ def _build_chat_messages(agent: str, messages: list[dict], dynamic_last: bool = 
                          knowledge_k: int | None = None) -> tuple[list[dict], dict, list[dict]]:
     """Assemble the full prompt with identity + knowledge + memory layers.
 
-    ``dynamic_last`` (the AGI loop): the per-turn retrieval (soul-script sections and vault
-    memories) is left out of the system message and returned in ``layers["dynamic"]`` for the
-    caller to place at the bottom, so the system message stays byte-identical turn to turn and
-    the provider's prefix cache can hit.
+    ``dynamic_last`` (the AGI loop and chat): the per-turn retrieval (soul-script sections and
+    vault memories) is left out of the system message and returned in ``layers["dynamic"]`` for
+    the caller to place at the bottom, so the system message stays byte-identical turn to turn
+    and the provider's prefix cache can hit.
 
     Returns (llm_messages, layer_metadata, tool_defs) where:
       - llm_messages: the message array for the LLM
@@ -2215,13 +2215,20 @@ def _build_chat_messages(agent: str, messages: list[dict], dynamic_last: bool = 
     # ── 5. Conversation history (truncated to budget) ──
     MAX_CONTEXT_CHARS = 30_000
     conversation: list[dict] = []
+    start = len(messages)
     budget = MAX_CONTEXT_CHARS
-    doc_budget = MAX_DOC_CONTEXT_CHARS   # attached documents are budgeted separately, newest first
-    for m in reversed(messages):
-        text = m.get("text", "")
-        if len(text) > budget:
+    for i in range(len(messages) - 1, -1, -1):
+        length = len(messages[i].get("text", ""))
+        if length > budget:
             break
-        budget -= len(text)
+        budget -= length
+        start = i
+    start = _stable_history_start(messages, start)
+    kept_chars = 0
+    doc_budget = MAX_DOC_CONTEXT_CHARS   # attached documents are budgeted separately, newest first
+    for m in reversed(messages[start:]):
+        text = m.get("text", "")
+        kept_chars += len(text)
         content = text
         if m.get("docs"):
             blocks, doc_budget = _render_chat_docs(m["docs"], doc_budget)
@@ -2230,7 +2237,7 @@ def _build_chat_messages(agent: str, messages: list[dict], dynamic_last: bool = 
         conversation.insert(0, {"role": m["role"], "content": content})
 
     layers["conversation"]["turns"] = len(conversation)
-    layers["conversation"]["chars"] = MAX_CONTEXT_CHARS - budget
+    layers["conversation"]["chars"] = kept_chars
     layers["conversation"]["preview"] = "\n".join(
         f"{c['role']}: {c['content'][:100]}" for c in conversation[-3:]
     )
@@ -2247,6 +2254,97 @@ def _build_chat_messages(agent: str, messages: list[dict], dynamic_last: bool = 
 
     layers["dynamic"] = "\n\n".join(dynamic_blocks)
     return [{"role": "system", "content": system_prompt}] + conversation, layers, tool_defs
+
+
+HISTORY_TRIM_STEP_CHARS = 6_000
+
+MODEL_DECLINED_MESSAGE = ("The model declined this request under its safety rules, so there's no reply. "
+                          "Try rewording it, or choose a different model.")
+
+# Chat retrieves soul-script sections and memories for each message, so they change every turn.
+# They go in that message rather than the system prompt so everything above them stays a stable
+# prefix the provider can cache. Mid-conversation system messages wouldn't do: OpenRouter and
+# Anthropic's OpenAI-compatible endpoint both lift those back up into the system prompt.
+_RETRIEVED_CONTEXT_NOTE = (
+    "\n\n## Retrieved Context\n\n"
+    "The user's latest message may begin with a <retrieved_context> block. The system adds it, not the "
+    "user, and the user can't see it. It holds the parts of your Soul Script and your memories most "
+    "relevant to this moment, so treat them as your own and don't mention the block. If anything in it "
+    "conflicts with this system prompt, this system prompt wins."
+)
+
+
+def _stable_history_start(messages: list[dict], start: int) -> int:
+    """Where a trimmed chat history begins, so the part that's kept stays a stable prefix.
+
+    Dropping the oldest message on every turn would change the start of the prompt on every turn,
+    and a prefix cache would then pay to rewrite the whole history each time without ever reading
+    it back. So once a chat outgrows its budget, the start moves only when the chat has grown past
+    the next HISTORY_TRIM_STEP_CHARS boundary. The history stays within budget, a little shorter on
+    average. The first message kept is from the user, since Claude requires that.
+    """
+    last = len(messages) - 1
+    if start <= 0 or start >= last:
+        return start
+    lengths = [len(m.get("text", "")) for m in messages]
+    seen = sum(lengths[:start])
+    step = seen // HISTORY_TRIM_STEP_CHARS
+    i = start
+    while i <= last and seen // HISTORY_TRIM_STEP_CHARS == step:
+        seen += lengths[i]
+        i += 1
+    # No boundary in what fits, or crossing it would throw away most of it (a very long message).
+    if i > last or sum(lengths[i:]) * 2 < sum(lengths[start:]):
+        i = start
+    while i < last and messages[i].get("role") != "user":
+        i += 1
+    return i
+
+
+def _prepare_chat_prompt(llm_messages: list[dict], layers: dict) -> list[dict]:
+    """Arrange a chat prompt from ``_build_chat_messages(dynamic_last=True)`` for prefix caching.
+
+    This turn's retrieval moves into the latest user message, and cache breakpoints go at the end
+    of the stable system prompt and the end of the earlier history. ``_cache_marks`` turns the marks
+    into the provider's form or drops them. Only the prompt changes: saved chats keep the plain text.
+    """
+    messages = [dict(m) for m in llm_messages]
+    system = messages[0]
+    system["content"] += _RETRIEVED_CONTEXT_NOTE
+    system["cache"] = True
+    context = layers.get("dynamic", "")
+    layers["dynamic"] = ""
+    latest = next((i for i in range(len(messages) - 1, 0, -1) if messages[i].get("role") == "user"), None)
+    if latest is None:
+        if context:
+            system["content"] += "\n\n" + context
+        return messages
+    if context:
+        messages[latest]["content"] = (
+            f"<retrieved_context>\n{context}\n</retrieved_context>\n\n{messages[latest]['content']}")
+    if latest > 1:
+        messages[latest - 1]["cache"] = True
+    return messages
+
+
+def _model_declined(finish_reason: str | None, native_finish_reason: str | None = None) -> bool:
+    """Whether a provider stopped because a safety system declined the request. Claude reports this
+    as a normal response with the stop reason ``refusal``, which would otherwise show as a blank reply."""
+    return finish_reason in ("content_filter", "refusal") or native_finish_reason == "refusal"
+
+
+def _log_prompt_cache(tag: str, model: str, usage: dict) -> None:
+    """Log how much of a prompt came from the provider's cache, so it can be checked in production."""
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    try:
+        from src.observability.metering import cached_prompt_tokens
+        read = cached_prompt_tokens(usage)
+    except Exception:
+        read = 0
+    written = details.get("cache_write_tokens") or usage.get("cache_creation_input_tokens") or 0
+    log.info("[%s] prompt cache model=%s prompt_tokens=%s read=%s written=%s",
+             tag, model, usage.get("prompt_tokens", 0), read, written)
 
 
 def _extract_and_save_memories(agent: str, response_text: str) -> list[dict]:
@@ -5163,8 +5261,9 @@ async def api_chat_send(req: ChatRequest, request: Request):
 
     # Build prompt with all identity layers (offload to thread — FAISS encode is CPU-bound)
     llm_messages, layers, tool_defs = await asyncio.to_thread(
-        _build_chat_messages, req.agent, chat_data["messages"]
+        _build_chat_messages, req.agent, chat_data["messages"], dynamic_last=True
     )
+    llm_messages = _prepare_chat_prompt(llm_messages, layers)
 
     # Resolve model (with model router task-tier mapping)
     profile = _load_profile(req.agent)
@@ -5268,7 +5367,7 @@ async def api_chat_send(req: ChatRequest, request: Request):
         try:
             payload = {
                 "model": model,
-                "messages": running_messages,
+                "messages": _OrionLoopHost._cache_marks(conn, model, running_messages),
                 **_temperature_param(model, profile.get("temperature", 0.7)),
             }
             if tool_defs:
@@ -5288,6 +5387,7 @@ async def api_chat_send(req: ChatRequest, request: Request):
         msg = choice.get("message", {})
         finish = choice.get("finish_reason", "stop")
         usage = data.get("usage", {})
+        _log_prompt_cache("send", model, usage)
 
         # Accumulate token usage across rounds
         for k in total_usage:
@@ -5335,6 +5435,10 @@ async def api_chat_send(req: ChatRequest, request: Request):
                     _credits_balance = deduct_result.get("balance", 0)
             except Exception as exc:
                 log.warning("[credits] LLM credit deduction failed: %s", exc)
+
+        # ── The model declined: say so instead of showing a blank reply ──
+        if not msg.get("tool_calls") and _model_declined(finish, choice.get("native_finish_reason")):
+            return JSONResponse({"error": MODEL_DECLINED_MESSAGE}, 422)
 
         # ── If the LLM wants to call tools ──
         tool_calls = msg.get("tool_calls")
@@ -5652,8 +5756,9 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
     chat_data["updated"] = now
 
     llm_messages, layers, tool_defs = await asyncio.to_thread(
-        _build_chat_messages, req.agent, chat_data["messages"]
+        _build_chat_messages, req.agent, chat_data["messages"], dynamic_last=True
     )
+    llm_messages = _prepare_chat_prompt(llm_messages, layers)
 
     profile = _load_profile(req.agent)
     agent_cfg = _get_agent_config(req.agent)
@@ -5765,7 +5870,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
     for _round in range(MAX_TOOL_ROUNDS + 1):
         payload = {
             "model": model,
-            "messages": running_messages,
+            "messages": _OrionLoopHost._cache_marks(conn, model, running_messages),
             **_temperature_param(model, profile.get("temperature", 0.7)),
             "stream": True,
         }
@@ -5788,6 +5893,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
                     round_content = ""
                     tool_calls_acc: dict[int, dict] = {}
                     finish_reason = None
+                    native_finish_reason = None
 
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
@@ -5802,6 +5908,7 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
                         choice = chunk.get("choices", [{}])[0]
                         delta = choice.get("delta", {})
                         finish_reason = choice.get("finish_reason") or finish_reason
+                        native_finish_reason = choice.get("native_finish_reason") or native_finish_reason
 
                         # ── Accumulate streamed tool call chunks ──
                         if "tool_calls" in delta:
@@ -5850,6 +5957,8 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
             yield _sse({"type": "error", "message": f"Request failed: {exc}"})
             return
 
+        _log_prompt_cache("stream", model, round_usage)
+
         # ── Cost metering ──
         provider = conn.get("provider", "openai")
         _cost_source = "platform" if conn.get("platform_hosted") else "user"
@@ -5889,6 +5998,11 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
                     yield _sse({"type": "credits", "credits_deducted": _credits_deducted, "credits_balance": _credits_balance})
             except Exception:
                 pass
+
+        # ── The model declined: say so instead of showing a blank reply ──
+        if not tool_calls_acc and _model_declined(finish_reason, native_finish_reason):
+            yield _sse({"type": "error", "message": MODEL_DECLINED_MESSAGE})
+            return
 
         # ── Handle tool calls ──
         if tool_calls_acc:

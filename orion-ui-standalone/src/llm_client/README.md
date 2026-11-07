@@ -39,7 +39,10 @@ class LLMClient(ABC):
 ### Anthropic (`anthropic_client.py`)
 - Uses the native Anthropic SDK (`anthropic` package)
 - Reads `ANTHROPIC_API_KEY` from environment variable
-- Known models: `claude-sonnet-4`, `claude-opus-4`, `claude-3.5-sonnet`, `claude-3.5-haiku`, `claude-3-opus`
+- Known models: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`
+- Profile options: `effort` (`low` to `max`, on models that take it) and `max_tokens` (default 64000, which has to cover thinking as well as the reply)
+- Caches prompts and, on models that support it, continues a declined request on a fallback model. Check `LLMResponse.stop_reason == "refusal"` for one that stayed declined
+- The web chat doesn't use this client yet: it calls providers directly in `web/app.py`
 
 ### Ollama (`ollama.py`)
 - Posts to `{base_url}/api/chat` with `stream: false`

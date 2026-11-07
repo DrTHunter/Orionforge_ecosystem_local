@@ -11870,8 +11870,8 @@ def test_agi_loop_cache_discipline():
         plain_msgs, plain_layers, _ = A._build_chat_messages("supervisor", msgs)
         dyn_msgs, dyn_layers, _ = A._build_chat_messages("supervisor", msgs, dynamic_last=True)
         plain_sys, dyn_sys = plain_msgs[0]["content"], dyn_msgs[0]["content"]
-        check("chat (default) still puts retrieval in the system prompt", directive in plain_sys and "Trent likes squats" in plain_sys)
-        check("chat (default) has no dynamic layer", plain_layers["dynamic"] == "")
+        check("by default retrieval stays in the system prompt", directive in plain_sys and "Trent likes squats" in plain_sys)
+        check("by default there is no dynamic layer", plain_layers["dynamic"] == "")
         check("loop mode keeps retrieval out of the system prompt", directive not in dyn_sys and "Trent likes squats" not in dyn_sys)
         check("…and returns it separately", directive in dyn_layers["dynamic"] and "Trent likes squats" in dyn_layers["dynamic"])
         vault_text = dyn_layers["dynamic"].split(directive + "\n\n", 1)[1]

@@ -1,20 +1,35 @@
-"""Anthropic Messages API client.
+"""Anthropic Messages API client, built on the official ``anthropic`` SDK.
 
 Talks directly to the Anthropic Messages API (https://api.anthropic.com/v1/messages).
-Supports tool calling, Computer Use (beta), and extended thinking.
+Supports tool calling, prompt caching, effort, and server-side fallback for when a
+model's safety classifiers decline a request.
 
 Set ANTHROPIC_API_KEY in your environment, or the client will fall back to the
 profile dict (not recommended for production).
 """
 
-import json
 import os
-import uuid
 from typing import Any, Dict, List, Optional
 
-import requests
+import anthropic
 
 from src.llm_client.base import LLMClient, LLMResponse, temperature_param
+
+ANTHROPIC_API_URL = "https://api.anthropic.com"
+
+# Thinking counts toward max_tokens, so this has to leave room for it as well as the reply.
+# Requests stream, so a limit this high can't hit an HTTP timeout.
+DEFAULT_MAX_TOKENS = 64_000
+
+# Models that take output_config.effort.
+_EFFORT_MODELS = (
+    "claude-fable-", "claude-mythos-", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5",
+)
+
+# Models whose declined requests can continue on another model, chosen by Anthropic by refusal category.
+_FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 class AnthropicClient(LLMClient):
@@ -22,29 +37,28 @@ class AnthropicClient(LLMClient):
 
     # Anthropic models → context windows (for reference only)
     KNOWN_MODELS = {
-        "claude-sonnet-4-20250514": 200_000,
-        "claude-opus-4-20250514": 200_000,
-        "claude-3-5-sonnet-20241022": 200_000,
-        "claude-3-5-haiku-20241022": 200_000,
-        "claude-3-opus-20240229": 200_000,
+        "claude-fable-5-1": 1_000_000,
+        "claude-opus-5-5": 1_000_000,
+        "claude-sonnet-5-5": 1_000_000,
+        "claude-haiku-5-5": 1_000_000,
     }
 
     def __init__(self, profile: dict):
         self.model: str = profile["model"]
-        self.base_url: str = profile.get(
-            "base_url", "https://api.anthropic.com"
-        ).rstrip("/")
+        self.base_url: str = profile.get("base_url", ANTHROPIC_API_URL).rstrip("/")
         # Prefer an explicit profile/connection key (bring-your-own), then fall
         # back to the platform-hosted ANTHROPIC_API_KEY environment variable.
         self.api_key: str = profile.get("api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         self.temperature: float = profile.get("temperature", 0.7)
-        self.max_tokens: int = profile.get("max_tokens", 4096)
+        self.max_tokens: int = profile.get("max_tokens", DEFAULT_MAX_TOKENS)
+        self.effort: Optional[str] = profile.get("effort")  # low, medium, high, xhigh or max
 
         if not self.api_key:
             raise EnvironmentError(
                 "ANTHROPIC_API_KEY environment variable is not set. "
                 "Export it before running with the anthropic provider."
             )
+        self._client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
 
     # ------------------------------------------------------------------
     # Main chat entry-point
@@ -54,16 +68,10 @@ class AnthropicClient(LLMClient):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> LLMResponse:
-        headers = {
-            "x-api-key": self.api_key,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-        }
-
         # Separate system message from conversation messages
         system_text, conv_messages = self._extract_system(messages)
 
-        body: Dict[str, Any] = {
+        kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": self._convert_messages(conv_messages),
             "max_tokens": self.max_tokens,
@@ -71,23 +79,27 @@ class AnthropicClient(LLMClient):
         }
 
         if system_text:
-            body["system"] = system_text
+            kwargs["system"] = system_text
 
         # Build tool definitions
         api_tools = self._build_tools(tools)
         if api_tools:
-            body["tools"] = api_tools
+            kwargs["tools"] = api_tools
 
-        resp = requests.post(
-            f"{self.base_url}/v1/messages",
-            headers=headers,
-            json=body,
-            timeout=180,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        if self.effort and self.model.startswith(_EFFORT_MODELS):
+            kwargs["output_config"] = {"effort": self.effort}
 
-        return self._parse_response(data)
+        # Features a proxy in front of the API may not understand.
+        if self.base_url == ANTHROPIC_API_URL:
+            kwargs["cache_control"] = {"type": "ephemeral"}
+            if self.model in _FALLBACK_MODELS:
+                kwargs["betas"] = [_FALLBACK_BETA]
+                kwargs["fallbacks"] = "default"
+
+        with self._client.beta.messages.stream(**kwargs) as stream:
+            message = stream.get_final_message()
+
+        return self._parse_response(message.to_dict())
 
     # ------------------------------------------------------------------
     # Tool schema conversion
@@ -132,15 +144,24 @@ class AnthropicClient(LLMClient):
                     "arguments": block.get("input", {}),
                 })
 
-        # Usage
-        usage_raw = data.get("usage", {})
+        # A declined request is a normal response with this stop reason. Anything written before
+        # the decline is discarded, and an unfinished tool call must not run.
+        stop_reason = data.get("stop_reason") or ""
+        if stop_reason == "refusal":
+            text_parts, tool_calls = [], []
+
+        # Usage. The API counts cached tokens separately from input_tokens.
+        usage_raw = data.get("usage") or {}
+        cache_read = usage_raw.get("cache_read_input_tokens") or 0
+        cache_write = usage_raw.get("cache_creation_input_tokens") or 0
+        prompt_tokens = (usage_raw.get("input_tokens") or 0) + cache_read + cache_write
+        completion_tokens = usage_raw.get("output_tokens") or 0
         usage = {
-            "prompt_tokens": usage_raw.get("input_tokens", 0),
-            "completion_tokens": usage_raw.get("output_tokens", 0),
-            "total_tokens": (
-                usage_raw.get("input_tokens", 0)
-                + usage_raw.get("output_tokens", 0)
-            ),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
         }
 
         return LLMResponse(
@@ -149,6 +170,7 @@ class AnthropicClient(LLMClient):
             model=data.get("model", self.model),
             usage=usage,
             raw=data,
+            stop_reason=stop_reason,
         )
 
     # ------------------------------------------------------------------
@@ -195,6 +217,11 @@ class AnthropicClient(LLMClient):
                         }
                     ],
                 })
+
+            elif role == "assistant" and m.get("raw_content"):
+                # The model's own blocks (LLMResponse.raw["content"]). Thinking blocks have to
+                # come back unmodified during a tool loop.
+                out.append({"role": "assistant", "content": m["raw_content"]})
 
             elif role == "assistant" and m.get("tool_calls"):
                 # Assistant messages with tool calls → content blocks

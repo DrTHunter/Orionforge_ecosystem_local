@@ -344,14 +344,40 @@ def test_temperature_only_where_it_is_taken():
         sent["body"] = json
         return Resp()
 
-    saved = A.requests.post, O.requests.post
-    A.requests.post = O.requests.post = fake_post
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
+            class Final:
+                @staticmethod
+                def to_dict():
+                    return Resp().json()
+            return Final()
+
+    class FakeMessages:
+        @staticmethod
+        def stream(**kwargs):
+            sent["body"] = kwargs
+            return FakeStream()
+
+    class FakeBeta:
+        messages = FakeMessages
+
+    class FakeSDK:
+        beta = FakeBeta
+
+    saved = O.requests.post
+    O.requests.post = fake_post
     try:
         for cls, model, takes in ((A.AnthropicClient, "claude-opus-5-5", False), (O.OpenAICompatClient, "gpt-5.6-sol", False),
                                   (O.OpenAICompatClient, "deepseek-chat", True)):
             client = cls.__new__(cls)
             client.__dict__.update(model=model, temperature=0.7, api_key="k", max_tokens=100,
-                                   base_url="http://x", url="http://x", timeout=5)
+                                   base_url="http://x", url="http://x", timeout=5, effort=None, _client=FakeSDK)
             try:
                 client.chat([{"role": "user", "content": "x"}])
             except Exception as exc:
@@ -360,7 +386,286 @@ def test_temperature_only_where_it_is_taken():
             check(f"{cls.__name__} with {model}: temperature {'sent' if takes else 'left out'}",
                   ("temperature" in sent.get("body", {})) is takes, sent.get("body"))
     finally:
-        A.requests.post, O.requests.post = saved
+        O.requests.post = saved
+
+
+def test_chat_prompt_caching():
+    print("\n=== Chat prompt caching ===")
+    import web.app as A
+    import src.observability.metering as metering
+    import src.storage.note_collector as nc
+
+    class FakeVault:
+        def search(self, q, scope=None, top_k=5):
+            return [{"text": f"a memory about {q}"}]
+
+    def build(history):
+        msgs, layers, _ = A._build_chat_messages("k_os", history, dynamic_last=True)
+        return A._prepare_chat_prompt(msgs, layers)
+
+    def texts(msgs):
+        return [m["content"] if isinstance(m["content"], str) else m["content"][0]["text"] for m in msgs]
+
+    claude = {"provider": "openrouter"}
+    model = "anthropic/claude-opus-5.5"
+    saved = nc.collect_notes, A._get_faiss_memory
+    tmp = tempfile.mkdtemp()
+    old_log = metering._get_cost_log_path()
+    metering.set_cost_log_path(os.path.join(tmp, "cost.jsonl"))
+    try:
+        nc.collect_notes = lambda agent, query=None, top_k=None: ("ALWAYS ON", f"SOUL for {query}" if query else "")
+        A._get_faiss_memory = lambda *a, **k: FakeVault()
+
+        turn1 = [{"role": "user", "text": "first"}]
+        turn2 = turn1 + [{"role": "assistant", "text": "reply one"}, {"role": "user", "text": "second"}]
+        turn3 = turn2 + [{"role": "assistant", "text": "reply two"}, {"role": "user", "text": "third"}]
+        p1, p2, p3 = build(turn1), build(turn2), build(turn3)
+
+        check("the system prompt doesn't change with the message", p1[0]["content"] == p2[0]["content"] == p3[0]["content"])
+        check("what's retrieved isn't in the system prompt", "SOUL for" not in p3[0]["content"]
+              and "a memory about" not in p3[0]["content"])
+        check("always-on knowledge stays in the system prompt", "ALWAYS ON" in p3[0]["content"])
+        check("the system prompt explains the retrieved block", "<retrieved_context>" in p3[0]["content"])
+        check("the latest message carries this turn's retrieval and the user's words",
+              p3[-1]["content"].startswith("<retrieved_context>") and "SOUL for third" in p3[-1]["content"]
+              and "a memory about third" in p3[-1]["content"] and p3[-1]["content"].endswith("third"))
+        check("earlier messages stay as they were said", p3[3]["content"] == "second" and p3[1]["content"] == "first")
+        check("saved chats aren't touched", turn3[-1]["text"] == "third" and turn3[0] == {"role": "user", "text": "first"})
+
+        w2 = A._OrionLoopHost._cache_marks(claude, model, p2)
+        w3 = A._OrionLoopHost._cache_marks(claude, model, p3)
+        check("last turn's cached prefix is still a prefix", texts(w3)[:3] == texts(w2)[:3])
+        marked = [i for i, m in enumerate(w3) if isinstance(m["content"], list)]
+        check("breakpoints mark the system prompt and the end of the history", marked == [0, 4], marked)
+        check("a first message marks only the system prompt",
+              [m.get("cache", False) for m in p1] == [True, False])
+        plain = A._OrionLoopHost._cache_marks({"provider": "openai"}, "gpt-5.5", p3)
+        check("other providers just lose the marks",
+              all("cache" not in m and isinstance(m["content"], str) for m in plain))
+        check("no retrieval leaves the message as written",
+              A._prepare_chat_prompt([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+                                     {"dynamic": ""})[1]["content"] == "u")
+
+        # A long chat: the kept history must hold still between boundaries, not shift every turn.
+        long_chat = [{"role": "user" if i % 2 == 0 else "assistant", "text": "x" * 700} for i in range(401)]
+        starts, kept = [], []
+        for n in range(61, 402, 2):
+            msgs = long_chat[:n]
+            raw, budget = n, 30_000
+            while raw > 0 and len(msgs[raw - 1]["text"]) <= budget:
+                budget -= len(msgs[raw - 1]["text"])
+                raw -= 1
+            s = A._stable_history_start(msgs, raw)
+            starts.append(s)
+            kept.append(sum(len(m["text"]) for m in msgs[s:]))
+        check("a trimmed history usually keeps its start", len(set(starts)) * 4 < len(starts), len(set(starts)))
+        check("the start only moves forward", starts == sorted(starts))
+        check("it stays within the budget, without losing much", max(kept) <= 30_000 and min(kept) >= 22_000,
+              (min(kept), max(kept)))
+        check("the first kept message is from the user", all(long_chat[s]["role"] == "user" for s in starts))
+        huge = [{"role": "user", "text": "a"}, {"role": "assistant", "text": "y" * 40_000},
+                {"role": "user", "text": "b" * 10}, {"role": "assistant", "text": "c" * 10}, {"role": "user", "text": "d"}]
+        check("a huge old message doesn't cost the messages after it", A._stable_history_start(huge, 2) == 2)
+        check("a chat under budget keeps everything", A._stable_history_start(turn3, 0) == 0)
+        built, _, _ = A._build_chat_messages("k_os", long_chat, dynamic_last=True)
+        check("the built history ends with the latest message, within budget",
+              built[-1]["role"] == "user" and sum(len(m["content"]) for m in built[1:]) <= 30_000)
+
+        # The real streaming handler, with the provider faked.
+        sent = []
+
+        class Stream:
+            status_code = 200
+
+            def __init__(self, lines):
+                self.lines = lines
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_lines(self):
+                for line in self.lines:
+                    yield line
+
+        def client_for(lines):
+            class Client:
+                def __init__(self, timeout=None):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+                def stream(self, method, url, json=None, headers=None):
+                    sent.append(json)
+                    return Stream(lines)
+            return Client
+
+        async def events(lines, conn, model_name):
+            real = A.httpx.AsyncClient
+            A.httpx.AsyncClient = client_for(lines)
+            out = []
+            try:
+                req = A.ChatRequest(agent="k_os", stimulus="third", model_override=model_name)
+                gen = A._stream_chat_generator(req, None, None, conn, {"id": "t", "messages": list(turn2)})
+                async for raw in gen:
+                    out.append(json.loads(raw[len("data: "):]))
+                    if out[-1]["type"] in ("text", "error"):
+                        await gen.aclose()
+                        break
+            finally:
+                A.httpx.AsyncClient = real
+            return out
+
+        ok_lines = ["data: " + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]}), "data: [DONE]"]
+        conn = {"id": "c", "provider": "openrouter", "url": "http://x/api/v1", "api_key": "k"}
+        asyncio.run(events(ok_lines, conn, model))
+        body = sent[-1]
+        check("the request marks the system prompt for caching",
+              body["messages"][0]["content"][0].get("cache_control") == {"type": "ephemeral"})
+        check("the request's last message holds the retrieval and the words",
+              "SOUL for third" in body["messages"][-1]["content"] and body["messages"][-1]["content"].endswith("third"))
+        check("the internal mark never reaches the provider", all("cache" not in m for m in body["messages"]))
+        asyncio.run(events(ok_lines, {"id": "c", "provider": "openai", "url": "http://x/v1"}, "gpt-5.5"))
+        check("a provider that caches on its own gets plain text",
+              all(isinstance(m["content"], str) and "cache" not in m for m in sent[-1]["messages"]))
+
+        # A decline shows a clear message rather than a blank reply.
+        declined = ["data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "content_filter",
+                                                        "native_finish_reason": "refusal"}]}), "data: [DONE]"]
+        got = asyncio.run(events(declined, conn, model))
+        check("a declined request says so", got and got[-1]["type"] == "error" and "declined" in got[-1]["message"], got)
+        check("the decline signals are recognized", A._model_declined("content_filter") and A._model_declined("refusal")
+              and A._model_declined("stop", "refusal") and not A._model_declined("stop") and not A._model_declined("length"))
+
+        # The non-streaming route takes the same path.
+        posted = []
+
+        class Reply:
+            status_code = 200
+
+            def __init__(self, data):
+                self.data = data
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.data
+
+        def posting_client(data):
+            class Client:
+                def __init__(self, timeout=None):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+                async def post(self, url, json=None, headers=None):
+                    posted.append(json)
+                    return Reply(data)
+            return Client
+
+        from types import SimpleNamespace
+        real = A.httpx.AsyncClient, A._resolve_connection, A._can_access_agent, A._create_new_chat
+        A.httpx.AsyncClient = posting_client({"choices": [{"message": {"role": "assistant", "content": None},
+                                                           "finish_reason": "content_filter",
+                                                           "native_finish_reason": "refusal"}], "usage": {}})
+        A._resolve_connection = lambda *a, **k: conn
+        A._can_access_agent = lambda *a, **k: True
+        A._create_new_chat = lambda agent: {"id": "t", "agent": agent, "messages": list(turn2)}
+        try:
+            result = asyncio.run(A.api_chat_send(A.ChatRequest(agent="k_os", stimulus="third", model_override=model),
+                                                 SimpleNamespace(state=SimpleNamespace(user=None))))
+        finally:
+            A.httpx.AsyncClient, A._resolve_connection, A._can_access_agent, A._create_new_chat = real
+        check("the send route marks the prompt too",
+              posted and posted[0]["messages"][0]["content"][0].get("cache_control") == {"type": "ephemeral"}
+              and "SOUL for third" in posted[0]["messages"][-1]["content"], posted[:1])
+        check("the send route reports a decline", result.status_code == 422 and b"declined" in result.body)
+    finally:
+        nc.collect_notes, A._get_faiss_memory = saved
+        metering.set_cost_log_path(old_log)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_anthropic_client():
+    print("\n=== Anthropic client ===")
+    import src.llm_client.anthropic_client as C
+    calls = []
+    reply = {}
+
+    class Final:
+        @staticmethod
+        def to_dict():
+            return reply["data"]
+
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        @staticmethod
+        def get_final_message():
+            return Final
+
+    class FakeMessages:
+        @staticmethod
+        def stream(**kwargs):
+            calls.append(kwargs)
+            return FakeStream()
+
+    class FakeBeta:
+        messages = FakeMessages
+
+    class FakeSDK:
+        beta = FakeBeta
+
+    def make(**profile):
+        client = C.AnthropicClient({"api_key": "k", **profile})
+        client._client = FakeSDK
+        return client
+
+    reply["data"] = {"content": [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": "hi"}],
+                     "model": "claude-opus-5-5", "stop_reason": "end_turn",
+                     "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100,
+                               "cache_creation_input_tokens": 20}}
+    resp = make(model="claude-opus-5-5", effort="low").chat([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}])
+    sent = calls[-1]
+    check("no thinking or temperature setting is sent", "thinking" not in sent and "temperature" not in sent)
+    check("the default limit leaves room for thinking", sent["max_tokens"] == 64_000)
+    check("the system prompt goes in its own field", sent["system"] == "s" and sent["messages"] == [{"role": "user", "content": "u"}])
+    check("effort is sent", sent["output_config"] == {"effort": "low"})
+    check("prompts are cached", sent["cache_control"] == {"type": "ephemeral"})
+    check("declined requests can fall back", sent["fallbacks"] == "default" and sent["betas"] == ["server-side-fallback-2026-07-01"])
+    check("the reply text is read by block type", resp.content == "hi" and resp.stop_reason == "end_turn")
+    check("cached tokens count as prompt tokens", resp.usage["prompt_tokens"] == 130 and resp.usage["total_tokens"] == 135
+          and resp.usage["cache_read_input_tokens"] == 100 and resp.usage["cache_creation_input_tokens"] == 20)
+    make(model="claude-haiku-4-5", effort="low").chat([{"role": "user", "content": "u"}])
+    check("effort and fallback only go to models that take them", "output_config" not in calls[-1] and "fallbacks" not in calls[-1])
+    make(model="claude-opus-5-5", base_url="https://proxy.example").chat([{"role": "user", "content": "u"}])
+    check("a proxy doesn't get beta features", "fallbacks" not in calls[-1] and "cache_control" not in calls[-1])
+
+    reply["data"] = {"content": [{"type": "text", "text": "partial"}, {"type": "tool_use", "id": "t", "name": "n", "input": {}}],
+                     "stop_reason": "refusal", "usage": None, "stop_details": {"category": "bio"}}
+    resp = make(model="claude-opus-5-5").chat([{"role": "user", "content": "u"}])
+    check("a decline discards partial text and tool calls", resp.content is None and resp.tool_calls == [] and resp.stop_reason == "refusal")
+    check("a missing usage doesn't break parsing", resp.usage["total_tokens"] == 0)
+
+    blocks = [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "tool_use", "id": "t", "name": "n", "input": {}}]
+    out = C.AnthropicClient._convert_messages([{"role": "assistant", "content": "", "raw_content": blocks,
+                                                "tool_calls": [{"call_id": "t", "tool": "n", "arguments": {}}]}])
+    check("thinking blocks come back unmodified in a tool loop", out == [{"role": "assistant", "content": blocks}])
 
 
 def test_config_revision():
@@ -1057,6 +1362,8 @@ if __name__ == "__main__":
     test_workbench_and_budget()
     test_config()
     test_temperature_only_where_it_is_taken()
+    test_chat_prompt_caching()
+    test_anthropic_client()
     test_config_revision()
     test_notes_migrate_to_directive()
     test_energy_refill_and_door()

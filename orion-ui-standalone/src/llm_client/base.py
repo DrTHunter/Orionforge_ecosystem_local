@@ -26,6 +26,7 @@ class LLMResponse:
     model: str = ""
     usage: Optional[Dict[str, int]] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+    stop_reason: str = ""  # the provider's own reason, e.g. "refusal" when a safety system declined
 
 
 class LLMClient(ABC):
