@@ -622,6 +622,10 @@ app.add_middleware(CSRFMiddleware)
 # Added last = outermost: fences demo.orionforge.chat off from the rest of the app.
 app.add_middleware(DemoHostMiddleware)
 
+# Outermost: robots.txt / sitemap.xml, and noindex on everything but the public demo.
+from web.seo import SeoMiddleware
+app.add_middleware(SeoMiddleware)
+
 # Compress responses over 1 KB. The loop pages poll JSON every few seconds (conversation, events,
 # journal, ticks) and every page carries ~140 KB of HTML; gzip cuts that by roughly 80–90%.
 # Streamed routes are never compressed (a gzip buffer would hold chat replies back until it filled),
