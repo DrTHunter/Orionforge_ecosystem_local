@@ -127,6 +127,14 @@ The soul script sections and memories retrieved for a message are placed in that
 
 Agents can save memories during conversation with `[MEMORY_SAVE: ...]` tags.
 
+## SoulScript-Engine — where the identity layer comes from
+
+OrionForge's identity layer is built on [**SoulScript-Engine**](https://github.com/DrTHunter/SoulScript-Engine), the standalone framework for persistent identity in LLM characters and agents. Its premise is the one this README opens with: character drift is mostly a retrieval problem, so instead of one ever-growing system prompt, the engine rebuilds the prompt every turn from a short base prompt, the sections of a Soul Script (a Markdown character document) most relevant to what was just said, always-on notes, and a few relevant long-term memories. Identity sits in a read-only index and memory in a read/write one, so conversations can add to what an agent remembers but cannot rewrite who it is.
+
+SoulScript-Engine on its own is a FastAPI reference app with a chat UI, memory management, knowledge notes, example Soul Scripts and Docker support, and it works with OpenAI-compatible APIs, Ollama and Anthropic. Start there if you want the framework without the rest of this app.
+
+This repository is the fuller app built around that idea: the agent roster, tools, MCP server, per-user accounts and the [AGI Loop](#agi-loop--minds-that-keep-running-optional) below. The loop itself has its own standalone repo, [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop), which pairs with SoulScript-Engine. Both Soul Script repos use the same dual license as this one (AGPL v3 or the commercial terms).
+
 ## AGI Loop — minds that keep running (optional)
 
 Beyond chat, OrionForge can run an agent as a **loop**: a wall-clock daemon (`orion-ui-standalone/src/agi_loop/`) that keeps going between messages. Each tick it *senses, updates beliefs, predicts, attends, feels, thinks/acts, guards, records, then sleeps*. A message at the door wakes it early.
