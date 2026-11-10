@@ -131,6 +131,8 @@ Agents can save memories during conversation with `[MEMORY_SAVE: ...]` tags.
 
 Beyond chat, OrionForge can run an agent as a **loop**: a wall-clock daemon (`orion-ui-standalone/src/agi_loop/`) that keeps going between messages. Each tick it *senses, updates beliefs, predicts, attends, feels, thinks/acts, guards, records, then sleeps*. A message at the door wakes it early.
 
+The loop's design comes from [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop), the standalone "inner world model" repo that pairs with [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine). This is the version that runs inside the full app, with the group chat, workbench, Linux machine and per-user loops added.
+
 - **Inner field** — what the agent sees is arranged around whatever it is focused on (FOCUS / CLOSE / AROUND / EDGE) by semantic relatedness, with HUD gauges, alerts, fading and finite capacity.
 - **Predictive senses** — raw channels the agent can't author (time, energy, body, door, bench) feed running beliefs; the mismatch becomes surprise, which drives learning and captures attention. Mood emerges from it.
 - **Energy** — a daily token budget (default 200k tokens / $2 per day, in `config/agi_loop.json`). Cadence slows as it drains; when it runs out the loop sleeps until the budget resets.
