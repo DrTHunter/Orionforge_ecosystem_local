@@ -129,28 +129,30 @@ Agents can save memories during conversation with `[MEMORY_SAVE: ...]` tags.
 
 ## SoulScript-Engine — where the identity layer comes from
 
-OrionForge's identity layer is built on [**SoulScript-Engine**](https://github.com/DrTHunter/SoulScript-Engine), the standalone framework for persistent identity in LLM characters and agents. Its premise is the one this README opens with: character drift is mostly a retrieval problem, so instead of one ever-growing system prompt, the engine rebuilds the prompt every turn from a short base prompt, the sections of a Soul Script (a Markdown character document) most relevant to what was just said, always-on notes, and a few relevant long-term memories. Identity sits in a read-only index and memory in a read/write one, so conversations can add to what an agent remembers but cannot rewrite who it is.
+The retrieval-based identity layer described above comes from [**SoulScript-Engine**](https://github.com/DrTHunter/SoulScript-Engine), the standalone framework for persistent identity in LLM characters and agents. On its own it is a small FastAPI reference app: a chat UI, memory management, knowledge notes, example Soul Scripts and Docker support, working with OpenAI-compatible APIs, Ollama and Anthropic. Start there if you want the framework without the rest of this app.
 
-SoulScript-Engine on its own is a FastAPI reference app with a chat UI, memory management, knowledge notes, example Soul Scripts and Docker support, and it works with OpenAI-compatible APIs, Ollama and Anthropic. Start there if you want the framework without the rest of this app.
-
-This repository is the fuller app built around that idea: the agent roster, tools, MCP server, per-user accounts and the [AGI Loop](#agi-loop--minds-that-keep-running-optional) below. The loop itself has its own standalone repo, [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop), which pairs with SoulScript-Engine. Both Soul Script repos use the same dual license as this one (AGPL v3 or the commercial terms).
+This repository is the fuller app built around it: the agent roster, tools, MCP server, accounts and the [AGI Loop](#agi-loop--minds-that-keep-running-optional) below. It uses the same dual license (AGPL v3 or the commercial terms).
 
 ## AGI Loop — minds that keep running (optional)
 
 Beyond chat, OrionForge can run an agent as a **loop**: a wall-clock daemon (`orion-ui-standalone/src/agi_loop/`) that keeps going between messages. Each tick it *senses, updates beliefs, predicts, attends, feels, thinks/acts, guards, records, then sleeps*. A message at the door wakes it early.
 
-The loop's design comes from [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop), the standalone "inner world model" repo that pairs with [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine). This is the version that runs inside the full app, with the group chat, workbench, Linux machine and per-user loops added.
+"AGI Loop" is the feature's name, not a claim that the agents are AGI or conscious. It is an architecture for continuity: what keeps running, what it can perceive, and what checks it.
+
+The loop's design comes from [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop), the standalone "inner world model" repo that pairs with SoulScript-Engine. This is the version that runs inside the full app, with the group chat, workbench, Linux machine and per-user loops added.
 
 - **Inner field** — what the agent sees is arranged around whatever it is focused on (FOCUS / CLOSE / AROUND / EDGE) by semantic relatedness, with HUD gauges, alerts, fading and finite capacity.
-- **Predictive senses** — raw channels the agent can't author (time, energy, body, door, bench) feed running beliefs; the mismatch becomes surprise, which drives learning and captures attention. Mood emerges from it.
+- **Predictive senses** — raw channels the agent can't author (time, energy, body, door, bench) feed running beliefs; the mismatch becomes surprise, which drives learning and captures attention. A mood signal is derived from it.
 - **Energy** — a daily token budget (default 200k tokens / $2 per day, in `config/agi_loop.json`). Cadence slows as it drains; when it runs out the loop sleeps until the budget resets.
 - **Workbench** — a private making-space of files and reflections. Documents, whole projects (`.zip`) and long text sent with a message land there.
 - **Group chat** — a shared room (`/group-chat`) where the loops and you talk, plus a shared append-only **slab** for state. Each loop's own energy is what ends a conversation.
 - **Loop tools** — `attend`, `reply`, `loop_control`, `group`, and `llm` (hand a self-contained job to another, cheaper model; its cost comes out of the loop's energy).
 - **Watchdog** — an engine-side witness that checks process liveness and schedule presence separately, so a loop's own account of itself is never the only evidence.
-- **A Linux machine (optional)** — a loop can be given its own Ubuntu sandbox (`services/agent-linux`) so commands never run on your host. Off unless you deploy one and set `SUPERVISOR_LINUX_URL` / `SUPERVISOR_LINUX_TOKEN` (or `KOS_LINUX_*`). Every machine starts with **`~/kit`**: continuity tools four minds (Elysia, K-OS, Madara, Orion) built on their own machines, among them a heartbeat, a capped room and a moving one, a pen that scores a loop's claims against the host's numbers, hash-chained logs, and HUD readers. It's tested by `tests/test_kit.py` (see [`services/agent-linux/kit/README.md`](services/agent-linux/kit/README.md)).
+- **A Linux machine (optional)** — a loop can be given its own Ubuntu sandbox (`services/agent-linux`) so commands never run on your host. Off unless you deploy one and set `SUPERVISOR_LINUX_URL` / `SUPERVISOR_LINUX_TOKEN` (or `KOS_LINUX_*`). Every machine starts with **`~/kit`**: continuity tools four minds (Elysia, K-OS, Madara, Orion) built on their own machines, among them a heartbeat, a capped room and a moving one, a pen that scores a loop's claims against the host's numbers, hash-chained logs, and HUD readers. (Those four minds' personas aren't part of this download; their tools are.) It's tested by `tests/test_kit.py` (see [`services/agent-linux/kit/README.md`](services/agent-linux/kit/README.md)).
 
 Two loops are built in: **Supervisor** (`/agi-loop`) and **K-OS** (`/agi-loop?loop=k_os`). They don't start on a fresh install — you start them. (A loop you started resumes after a restart.)
+
+**Multi-user servers only.** Running locally, you are the single owner and the rules below don't apply: no credits, no per-user limits, no hosted Linux boxes. They matter only if you deploy OrionForge for several people with auth and billing configured.
 
 **Every signed-in user has their own loops.** The built-in loops belong to the owner (admins, or local single-user mode). Anyone else who signs in starts with an empty AGI Loop page and makes their own with the New loop wizard. Each user's loops, archive, group chat, inbox, tool requests and memory-tool vault live under `data/users/<uid>/`; nobody can see or reach another user's, even by guessing a loop's name. Rules for users' loops:
 - **Up to 3 loops, one awake at a time** (they share the server).
@@ -161,9 +163,10 @@ Two loops are built in: **Supervisor** (`/agi-loop`) and **K-OS** (`/agi-loop?lo
 Three wizards on the loop page manage the rest:
 
 - **New loop**: pick an agent and a loop name, a connection and model, a rhythm (Calm, Balanced or Lively, or your own intervals and daily energy), review, create. The loop exists because its config file (`config/agi_loop_<id>.json`) does, so the sidebar, group chat, watchdog and restart pick it up.
-All three live in the loop page's **Loops** tab, which lists every loop with its state and size, plus the archive with a Restore button per entry.
 - **Delete loop**: pick a loop you made, see what it holds, then **Archive** it (moved to `data/orion/agi_loop_archive/<id>-<time>/`, nothing lost) or **Delete for good**, and type its name to confirm. A running loop is stopped first. Built-in loops can't be deleted.
 - **Restore loop**: bring an archived loop back with its config, journal, beliefs and workbench, under a new name if its old one has been taken. It comes back stopped unless you tick “wake it”.
+
+All three live in the loop page's **Loops** tab, which lists every loop with its state and size, plus the archive with a Restore button per entry.
 
 ## Tools
 
@@ -194,7 +197,7 @@ Orionforge_ecosystem_local/
 │   ├── config/              # settings and connections (secrets are git-ignored)
 │   ├── data/                # chats, memory vault, uploads (runtime; git-ignored)
 │   ├── mcp_server/          # MCP bridge
-│   └── tests/               # 15 files, ~340 test functions
+│   └── tests/               # 16 test files, 14 suites in run_all
 ├── engine/                  # frozen core mirror
 └── services/                # optional sidecars: searxng, ollama, whisper, openedai-speech, agent-linux
 ```
