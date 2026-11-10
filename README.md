@@ -16,6 +16,22 @@ It rests on one idea: character drift is a retrieval problem. A single giant sys
 
 You need **Python 3.10+** (3.11 recommended) and about 2 GB of free disk (FAISS and sentence-transformers are large).
 
+### Or let Claude set it up
+
+If you use [Claude Code](https://claude.com/claude-code) (or another coding agent that can run commands), open it in the folder where you keep projects and paste:
+
+```text
+Set up OrionForge Ecosystem — Local Edition from https://github.com/DrTHunter/Orionforge_ecosystem_local on this machine.
+Read its README first and follow the Quick start: clone it, check my Python version, run the launch script for my OS,
+and fix anything that fails along the way, telling me what you changed. When the app answers on http://localhost:8989,
+run `python -X utf8 -m tests.test_agi_loop` from orion-ui-standalone/ to confirm the loop works. Then tell me how to add
+a model connection. Don't paste or store any API keys yourself — I'll add mine in Settings → Add Connection.
+```
+
+It does the same steps as below; read what it runs before you approve it. Keys stay with you: add them in the app's Settings, not in the chat.
+
+### Or do it yourself
+
 **1. Download**
 
 ```bash
