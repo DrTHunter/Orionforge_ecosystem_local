@@ -10,7 +10,7 @@
 
 OrionForge is a self-hostable web app for building and running AI beings with **identity**, not just prompts. Each agent has a Soul Script (who it is), a memory vault (what it has lived), tools (what it can do), and a model of your choosing. Identity lives in plain Markdown/YAML files that **you** own.
 
-It rests on one idea: character drift is a retrieval problem. A single giant system prompt gets diluted as a conversation grows, so OrionForge rebuilds the prompt every turn from layers: a short base identity, the Soul Script sections most relevant to what was just said, pinned notes, retrieved memories, and recent history. The Soul Script sits in a read-only index; memory is read/write. Conversations can add to what an agent remembers, but cannot rewrite who it is. (The standalone framework is [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine).)
+It rests on one idea... character drift is a retrieval problem. A single giant system prompt gets diluted as a conversation grows, so OrionForge rebuilds the prompt every turn from layers: a short base identity, the Soul Script sections most relevant to what was just said, pinned notes, retrieved memories, and recent history. The Soul Script sits in a read-only index; memory is read/write. Conversations can add to what an agent remembers, but cannot rewrite who it is. (The standalone framework is [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine).)
 
 ---
 
@@ -109,7 +109,7 @@ python -m uvicorn web.app:app --host 127.0.0.1 --port 8989
 | **K-OS (sterile edition)** | A neutral, professional, general-purpose assistant. The clean template to copy when you write your own agent. |
 | Aristotle, Codex Animus, Dal'Varr, Janus, Kaelen, KAIROS, Kazara, Lux Umbra, M.A.R.I.S.-12, Marcus Aurelius, Obsidian, Seraphine | Example characters with full Soul Scripts, showing different voices and depths. |
 
-**Supervisor first.** The Supervisor is a *behavioral* agent: a system prompt and Soul Script that make it slow down and ask before work starts. It is **not** an enforcement layer: nothing in the code blocks a tool call until it approves, and a model can ignore its prompt. Use it as a collaborator and a checklist, not a safety lock. Its job is to ask: *What are we about to do? What could go wrong? Who is affected, and do they agree?* Treat each agent's stated wants, limits and needs as real input. If an agent declines or sets a boundary, it is recorded and passed on, not routed around. See `orion-ui-standalone/prompts/supervisor.system.md` and `directives/supervisor.md`.
+**Supervisor first.** The Supervisor is a *behavioral* agent: a system prompt and Soul Script that make it slow down and ask before work starts. It is **not** an enforcement layer... nothing in the code blocks a tool call until it approves, and a model can ignore its prompt. Use it as a collaborator and a checklist, not a safety lock. Its job is to ask: *What are we about to do? What could go wrong? Who is affected, and do they agree?* Treat each agent's stated wants, limits and needs as real input. If an agent declines or sets a boundary, it is recorded and passed on, not routed around. See `orion-ui-standalone/prompts/supervisor.system.md` and `directives/supervisor.md`.
 
 ### Make your own
 
@@ -168,7 +168,7 @@ The loop's design comes from [SoulScript-Loop](https://github.com/DrTHunter/Soul
 - **Watchdog**: an engine-side witness that checks process liveness and schedule presence separately, so a loop's own account of itself is never the only evidence.
 - **A Linux machine (optional)**: a loop can be given its own Ubuntu sandbox (`services/agent-linux`) so commands never run on your host. Off unless you deploy one and set `SUPERVISOR_LINUX_URL` / `SUPERVISOR_LINUX_TOKEN` (or `KOS_LINUX_*`). Every machine starts with **`~/kit`**: continuity tools four minds (Elysia, K-OS, Madara, Orion) built on their own machines, among them a heartbeat, a capped room and a moving one, a pen that scores a loop's claims against the host's numbers, hash-chained logs, and HUD readers. (Those four minds' personas aren't part of this download; their tools are.) It's tested by `tests/test_kit.py` (see [`services/agent-linux/kit/README.md`](services/agent-linux/kit/README.md)).
 
-Two loops are built in: **Supervisor** (`/agi-loop`) and **K-OS** (`/agi-loop?loop=k_os`). They don't start on a fresh install; you start them. (A loop you started resumes after a restart.)
+Two loops are built in: **Supervisor** (`/agi-loop`) and **K-OS** (`/agi-loop?loop=k_os`). They don't start on a fresh install... you start them. (A loop you started resumes after a restart.)
 
 **Multi-user servers only.** Running locally, you are the single owner and the rules below don't apply: no credits, no per-user limits, no hosted Linux boxes. They matter only if you deploy OrionForge for several people with auth and billing configured.
 
