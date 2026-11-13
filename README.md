@@ -1,14 +1,26 @@
-# OrionForge Ecosystem: Local Edition
+<div align="center">
 
-> **Local edition.** Download it, run it on your own machine, bring your own model. No account, no hosted services, no bundled API keys.
+# 🌌 **OrionForge Ecosystem**
 
-**Built on [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine)** (the identity layer) · loop from [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop)
+### *Local Edition. A strategy for sustaining individual AI identity over time.*
 
-*Strategy for sustaining individual AI identity over time.*
+**Run it on your own machine. Bring your own model. No account, no hosted services, no bundled API keys.**
+
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-8a2be2?style=for-the-badge)](LICENSE)
+[![Commercial: free to $100k](https://img.shields.io/badge/commercial-free%20to%20%24100k-ff2e88?style=for-the-badge)](LICENSE.md)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1f1f1f?style=for-the-badge&logo=python&logoColor=white)](#quick-start)
+[![Built on SoulScript Engine](https://img.shields.io/badge/built%20on-SoulScript%20Engine-00c2a8?style=for-the-badge)](https://github.com/DrTHunter/SoulScript-Engine)
+[![Loop from SoulScript Loop](https://img.shields.io/badge/loop%20from-SoulScript%20Loop-3b5bdb?style=for-the-badge)](https://github.com/DrTHunter/SoulScript-Loop)
+
+`base identity` → `soul script` → `pinned notes` → `memories` → `history` → **rebuilt every turn. the same mind, every time.**
 
 https://github.com/user-attachments/assets/10950688-039a-41d4-aa66-706b09027d1d
 
 https://github.com/user-attachments/assets/f3e5d723-c466-4965-9570-8812ea776b5c
+
+</div>
+
+---
 
 > This is the downloadable, local edition of the OrionForge ecosystem. The full vision has three parts (a modular web UI, a cloud portal where each person runs their own agents, and a marketplace for identities, tools and mods), plus a fourth that grew out of them: [minds that keep running](#agi-loop-minds-that-keep-running-optional). This repo is the first and fourth: the UI and the loop, on your own machine.
 
