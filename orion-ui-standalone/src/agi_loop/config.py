@@ -9,19 +9,19 @@ from typing import Any, Dict
 log = logging.getLogger(__name__)
 
 LLM_MODELS: Dict[str, Dict[str, str]] = {
-    "deepseek_chat":     {"openrouter": "deepseek/deepseek-v4.1-flash",  "provider": "deepseek",  "model": "deepseek-chat"},
     "deepseek_reasoner": {"openrouter": "deepseek/deepseek-v4-pro-0813", "provider": "deepseek",  "model": "deepseek-reasoner"},
-    "kimi":              {"openrouter": "moonshotai/kimi-k3",            "provider": "",          "model": ""},
+    "deepseek_chat":     {"openrouter": "deepseek/deepseek-v4.1-flash-1017", "provider": "deepseek", "model": "deepseek-chat"},
+    "kimi":              {"openrouter": "moonshotai/kimi-k3.1-pro",      "provider": "",          "model": ""},
     "qwen":              {"openrouter": "qwen/qwen3.8-max-0902",         "provider": "",          "model": ""},
     "claude_haiku":      {"openrouter": "anthropic/claude-haiku-5.5",    "provider": "anthropic", "model": "claude-haiku-5-5"},
     "claude_sonnet":     {"openrouter": "anthropic/claude-sonnet-5.5",   "provider": "anthropic", "model": "claude-sonnet-5-5"},
     "claude_opus":       {"openrouter": "anthropic/claude-opus-5.5",     "provider": "anthropic", "model": "claude-opus-5-5"},
-    "claude_fable":      {"openrouter": "anthropic/claude-fable-5.1",    "provider": "anthropic", "model": "claude-fable-5-1"},
+    "claude_fable":      {"openrouter": "anthropic/claude-fable-5.2",    "provider": "anthropic", "model": "claude-fable-5-2"},
     "gpt_mini":          {"openrouter": "openai/gpt-6-luna",             "provider": "openai",    "model": "gpt-6-luna"},
     "gpt":               {"openrouter": "openai/gpt-6.1-sol",            "provider": "openai",    "model": "gpt-6.1-sol"},
     "gpt_pro":           {"openrouter": "openai/gpt-6-astra",            "provider": "openai",    "model": "gpt-6-astra"},
     "gemini_flash":      {"openrouter": "google/gemini-3.8-flash",       "provider": "google_gemini", "model": "gemini-3.8-flash"},
-    "gemini_pro":        {"openrouter": "google/gemini-3.1-pro-preview", "provider": "google_gemini", "model": "gemini-3.1-pro-preview"},
+    "gemini_pro":        {"openrouter": "google/gemini-4-argon",         "provider": "google_gemini", "model": "gemini-4-argon"},
     "grok":              {"openrouter": "x-ai/grok-4.7",                 "provider": "xai",       "model": "grok-4.7"},
     "hermes":            {"openrouter": "nousresearch/hermes-4-405b",    "provider": "",          "model": ""},
 }
@@ -32,6 +32,7 @@ RETIRED_LLM_SLUGS = {
     "deepseek/deepseek-chat", "deepseek/deepseek-r1-0528", "moonshotai/kimi-k2.5", "qwen/qwen3-max",
     "anthropic/claude-haiku-4.5", "openai/gpt-5.4-mini", "openai/gpt-5.5", "openai/gpt-5.5-pro",
     "google/gemini-3.5-flash", "x-ai/grok-4.3",
+    "deepseek/deepseek-v4.1-flash", "moonshotai/kimi-k3", "anthropic/claude-fable-5.1", "google/gemini-3.1-pro-preview",
 }
 
 # Bumped when the recommended knobs change. A saved config from an older
