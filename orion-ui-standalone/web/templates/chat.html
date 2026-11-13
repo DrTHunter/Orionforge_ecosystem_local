@@ -1415,8 +1415,10 @@ function onConnectionChange(sel) {
 
 function _makeModelOption(connId, m) {
   const o = document.createElement('option');
-  o.value = `${connId}::${typeof m === 'string' ? m : m.model}`;
-  let label = typeof m === 'string' ? m : m.model;
+  const id = typeof m === 'string' ? m : m.model;
+  o.value = `${connId}::${id}`;
+  const name = (_lastPlatformData && _lastPlatformData.labels || {})[id];
+  let label = name ? `${name} — ${id}` : id;
   if (m.est_credits_per_1k_tok > 0) {
     label += ` (~${m.est_credits_per_1k_tok} cr/1k tok)`;
   }

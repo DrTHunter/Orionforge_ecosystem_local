@@ -7973,18 +7973,25 @@ def _trial_provider_sort_key(p: dict) -> tuple:
 # model ids — any not in a connection's live model list are skipped, so a
 # retired model simply drops out. Review when vendors ship new flagships.
 PREFERRED_PLATFORM_MODELS = [
-    "openai/gpt-6-sol",
+    "deepseek/deepseek-v4-pro-0813",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "openai/gpt-6.1-sol",
     "openai/gpt-6-luna",
     "anthropic/claude-opus-5.5",
-    "anthropic/claude-sonnet-5",
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-haiku-5.5",
+    "google/gemini-4-argon",
     "google/gemini-3.8-flash",
-    "google/gemini-3.1-pro-preview",
-    "deepseek/deepseek-v4.1-flash",
-    "deepseek/deepseek-v4-pro",
     "x-ai/grok-4.7",
-    "moonshotai/kimi-k2.6",
-    "qwen/qwen3.8-flash",
+    "moonshotai/kimi-k3.1-pro",
+    "qwen/qwen3.8-max-0902",
 ]
+
+# Friendly names for Recommended picks whose ids don't say what they are.
+PREFERRED_MODEL_LABELS = {
+    "deepseek/deepseek-v4-pro-0813": "DeepSeek Reasoner",
+    "deepseek/deepseek-v4.1-flash-1017": "DeepSeek Chat",
+}
 
 
 @app.get("/api/platform/models")
@@ -8044,6 +8051,7 @@ async def api_platform_models(request: Request):
     return JSONResponse({
         "providers": providers,
         "preferred": preferred,
+        "labels": PREFERRED_MODEL_LABELS,
         "credits_balance": credits,
         "trial": on_trial,
         "markup": LLM_MARKUP_MULTIPLIER,
