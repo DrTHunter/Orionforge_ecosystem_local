@@ -1,3 +1,11 @@
+
+
+https://github.com/user-attachments/assets/f3e5d723-c466-4965-9570-8812ea776b5c
+
+
+
+https://github.com/user-attachments/assets/10950688-039a-41d4-aa66-706b09027d1d
+
 # OrionForge Ecosystem: Local Edition
 
 > **Local edition.** Download it, run it on your own machine, bring your own model. No account, no hosted services, no bundled API keys.
