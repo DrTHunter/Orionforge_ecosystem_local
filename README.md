@@ -1,14 +1,3 @@
-
-
-
-
-
-https://github.com/user-attachments/assets/10950688-039a-41d4-aa66-706b09027d1d
-
-
-https://github.com/user-attachments/assets/f3e5d723-c466-4965-9570-8812ea776b5c
-
-
 # OrionForge Ecosystem: Local Edition
 
 > **Local edition.** Download it, run it on your own machine, bring your own model. No account, no hosted services, no bundled API keys.
@@ -16,6 +5,10 @@ https://github.com/user-attachments/assets/f3e5d723-c466-4965-9570-8812ea776b5c
 **Built on [SoulScript-Engine](https://github.com/DrTHunter/SoulScript-Engine)** (the identity layer) · loop from [SoulScript-Loop](https://github.com/DrTHunter/SoulScript-Loop)
 
 *Strategy for sustaining individual AI identity over time.*
+
+https://github.com/user-attachments/assets/10950688-039a-41d4-aa66-706b09027d1d
+
+https://github.com/user-attachments/assets/f3e5d723-c466-4965-9570-8812ea776b5c
 
 > This is the downloadable, local edition of the OrionForge ecosystem. The full vision has three parts (a modular web UI, a cloud portal where each person runs their own agents, and a marketplace for identities, tools and mods), plus a fourth that grew out of them: [minds that keep running](#agi-loop-minds-that-keep-running-optional). This repo is the first and fourth: the UI and the loop, on your own machine.
 
