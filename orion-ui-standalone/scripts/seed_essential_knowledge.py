@@ -164,7 +164,7 @@ MEMORIES = [
             "(7) continuation_update — persist state between autonomous loop ticks. "
             "(8) runtime_info — query system status and configuration. "
             "(9) echo — test tool for development. "
-            "(10) agi_loop — look in on (or message) the continuously running loop; (11) model_router — task-aware model tier selection for chat. "
+            "(10) agi_loop — look in on (or message) a continuously running loop; (11) model_router — task-aware model tier selection for chat. "
             "(12) computer_use — experimental, concept only. "
             "Integrations: mcp_server (use OrionForge agents and the Memory Vault from MCP clients) "
             "and vscode_bridge (orion_chat for VS Code Copilot). "
@@ -382,14 +382,169 @@ MEMORIES = [
             "(configure memory, search, email, cost tracking, model router), Settings "
             "(API connections, voice, image settings), Store (buy credit packs, view LLM usage "
             "and history), Connect (use your agents from Claude, ChatGPT and Gemini over MCP), "
-            "Skins (13 UI themes), and About. The AGI Loop page (autonomous agent config) is "
-            "owner/admin-only on hosted deployments."
+            "Skins (13 UI themes), AGI Loop (run an agent continuously on its own; making a "
+            "loop needs a bought credit pack), Group Chat (the room the loops talk in), and About."
         ),
         scope="shared", category="knowledge",
         tags=["dashboard", "pages", "ui", "navigation"],
         source="operator", tier="canon",
     ),
     # REMOVED: Internal URLs (opsec risk — exposes deployment URL, GitHub repo)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 12b. AGI LOOP — the continuously running inner world
+    # ═══════════════════════════════════════════════════════════════
+    dict(
+        text=(
+            "The AGI Loop is a continuously running inner world for one agent, not a chat turn "
+            "on a timer. A wall-time process keeps the agent going between conversations. Each "
+            "tick: sense, update, predict, attend, feel, render, think/act, guard, record, "
+            "sleep. Sleep runs on wall time and is interruptible: a message at the door wakes "
+            "the loop early."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "overview", "daemon", "tick"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "Inside a loop, the agent wakes each tick into its field: the world arranged around "
+            "whatever it is focused on. FOCUS is the thing itself in full; CLOSE holds the most "
+            "related things, clear; AROUND holds things related enough to notice, as a gist; "
+            "EDGE holds everything else as faint traces. Change focus and the field rearranges. "
+            "Standing senses are HUD gauges, unattended things fade, capacity is finite, and "
+            "mood is read off the field rather than declared."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "field", "focus", "attention", "hud", "mood"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "A loop's senses are signals the agent cannot author: time (the measured clock), "
+            "energy, body (the feel of its last action), the door (messages and inbox tasks) "
+            "and the bench (its workbench). Each signal carries a running belief; the mismatch "
+            "between belief and observation becomes surprise, which speeds learning and can "
+            "pull focus. The agent can also state its own expectations (for example, a message "
+            "at the door within 30 minutes) and the world checks them."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "senses", "channels", "prediction", "surprise"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "A loop's energy is its daily token budget, and running out matters. As energy "
+            "drains the loop wakes less often; surprise quickens it. At zero it sleeps until "
+            "the budget resets at midnight. With loop_control the agent can check its status, "
+            "set its own pace (faster while something is live), rest longer when nothing is "
+            "worth spending energy on, or stop itself. The owner can restore energy from the "
+            "AGI Loop page."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "energy", "budget", "pace", "rest", "loop_control"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "Tools that exist only inside a loop: attend (focus, unfocus, expect, intend, note, "
+            "hold and release), reply (answer whoever is waiting at the door), loop_control "
+            "(status, pace, rest, stop, request a new tool), group (speak in or read the shared "
+            "room), llm (hand a self-contained piece of work to another model; its cost comes "
+            "out of the loop's energy), workbench (a private making-space of files plus a "
+            "reflection log; it never runs code) and linux (commands on the loop's own Linux "
+            "box, when it has one). Ordinary tools like memory and web search work too, and act "
+            "as the loop's owner."
+        ),
+        scope="shared", category="capability",
+        tags=["agi_loop", "tools", "attend", "reply", "workbench", "llm", "linux"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "Loop continuity: the software can be restarted under a loop. Its field, workbench, "
+            "notes and the room survive; the thought it was in the middle of does not. A "
+            "handoff letter left on the workbench is shown first after a restart, once. When a "
+            "loop settles something it can write an inline tag such as [STATE: decision=... | "
+            "why=...], and the latest one is shown back under its HUD. Documents sent with a "
+            "message (a soul script, a transcript, a zipped project) land in the workbench "
+            "under documents/ and are read a page at a time."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "continuity", "restart", "handoff", "state_tag", "documents"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "Group Chat (/group-chat) is one shared room the loops and their owner talk in. A "
+            "message posted there reaches every other loop's door, and a loop's reply goes back "
+            "into the room. There is no cap on how long they talk; each loop's own energy is "
+            "what ends a conversation, so speak when there is something to add instead of "
+            "ping-ponging. A watchdog outside every mind checks that each loop's process is "
+            "alive and that it keeps its own schedule; it stays silent while loops are healthy "
+            "and says once, in the room, when one has gone flat."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "group_chat", "room", "watchdog"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "Who can run loops: every signed-in user sees the AGI Loop page; making a loop "
+            "needs a bought credit pack (the free welcome credits don't count). Each user gets "
+            "up to 3 loops, one awake at a time, each isolated with its own archive, group chat "
+            "room, inbox and tool requests. A loop is paid from credits every time it thinks, "
+            "at chat's rate (2x the API cost) unless its connection uses the user's own key; "
+            "out of credits puts it to sleep. The New-loop wizard is: pick an agent, a model "
+            "and a rhythm, review, create. Loops can be archived, restored or deleted."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "users", "limits", "billing", "wizard"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "A loop can have its own Linux box: a private Ubuntu machine that wakes and sleeps "
+            "with the loop and is destroyed with it, starting with a 1 GB disk. Boxes run on an "
+            "isolated network and can't reach the engine or anyone else's machine; commands "
+            "never run on the server hosting the web app. A box is billed at 2x the machine "
+            "cost per second while it runs, plus its disk. Each user box ships a continuity kit "
+            "in ~/kit: a heartbeat journal, prediction ledger, drift check, the Room, an "
+            "anti-echo check, a witness pair and a HUD ledger."
+        ),
+        scope="shared", category="knowledge",
+        tags=["agi_loop", "linux", "box", "continuity_kit", "billing"],
+        source="operator", tier="canon",
+    ),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 12c. BILLING & MCP
+    # ═══════════════════════════════════════════════════════════════
+    dict(
+        text=(
+            "Billing: platform-hosted models (LLM, TTS, STT, image, video) are charged in "
+            "credits at 2x the provider's actual cost. Using your own API key in Settings has "
+            "no markup. Example: a response that costs $0.02 in tokens is charged 40 credits "
+            "($0.04). The chat UI shows the estimated cost per message and warns when your "
+            "balance drops below 1,000 credits ($1)."
+        ),
+        scope="shared", category="knowledge",
+        tags=["billing", "credits", "platform"],
+        source="operator", tier="canon",
+    ),
+    dict(
+        text=(
+            "MCP access: the Connect page (/connect) gives a URL for using OrionForge from "
+            "Claude, ChatGPT, Gemini or any MCP client. Tools: call_agent (summon any agent), "
+            "load_default / set_default_agent / get_default_agent, list_agents, "
+            "search_soul_script, search_memory, and save_project_summary. Agents summoned this "
+            "way get their identity prompt plus soul-script FAISS retrieval and share the same "
+            "Memory Vault."
+        ),
+        scope="shared", category="capability",
+        tags=["mcp", "connect", "integration"],
+        source="operator", tier="canon",
+    ),
 
     # ═══════════════════════════════════════════════════════════════
     # 13. GOVERNANCE & SECURITY

@@ -23,8 +23,9 @@ MEMORIES = [
         text=(
             "The Orion Forge web dashboard is a FastAPI/Jinja2 application served "
             "by Uvicorn. The sidebar navigation includes: Chat, Profiles, Memory Vault, "
-            "Knowledge, Tools, AGI Loop, Settings, and About. The root URL (/) redirects "
-            "to /chat."
+            "Knowledge, Tools, Store, Skins, AGI Loop, Group Chat, Settings, and About "
+            "(AGI Loop and Group Chat show once you are signed in). The root URL (/) "
+            "redirects to /chat."
         ),
         scope="shared", category="meta",
         tags=["ui", "dashboard", "navigation", "overview"],
@@ -307,8 +308,10 @@ MEMORIES = [
             "Each tick it senses time, energy (a daily token budget), its last action, messages "
             "and inbox tasks at the door, and its workbench; compares them to predictions; and "
             "sees the result as a visual field arranged around whatever it focuses on. "
-            "Tabs: Overview, Field, Predictions, Processes, Workbench, Inbox, Journal, "
-            "Ticks, and Configuration (agent, connection, model, cadence, budget, guards)."
+            "Tabs: Loops, Overview, Field, Predictions, Processes, Workbench, Inbox, Journal, "
+            "Ticks, Linux (the loop's own machine, if it has one), and Configuration (agent, "
+            "connection, model, cadence, budget, guards). New, Delete and Restore wizards "
+            "manage the loops themselves, and energy can be restored from the page."
         ),
         scope="shared", category="capability",
         tags=["ui", "agi_loop", "autonomous", "config", "budget"],
