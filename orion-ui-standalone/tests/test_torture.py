@@ -13463,6 +13463,306 @@ def test_owner_only_agents():
         _app.ADMIN_EMAILS.discard(admin_email)
 
 
+# ═════════════════════════════════════════════
+# CHAT ATTACHMENTS — many photos, videos (frames + Whisper), PDFs and code files per message
+# ═════════════════════════════════════════════
+def test_chat_attachments():
+    print("\n=== TORTURE: Chat attachments — upload, vision inlining, CSRF, Whisper ===")
+    import io
+    import re
+    import tempfile
+    import shutil
+    import httpx
+    from fastapi.testclient import TestClient
+    from PIL import Image
+    import web.app as _app
+
+    ui = Path(__file__).resolve().parent.parent
+    html = (ui / "web" / "templates" / "chat.html").read_text(encoding="utf-8")
+    src = (ui / "web" / "app.py").read_text(encoding="utf-8")
+    client = TestClient(_app.app)
+    SAME = {"Sec-Fetch-Site": "same-origin"}
+
+    def upload(name, data, headers=SAME):
+        r = client.post("/api/chat/upload", files={"file": (name, data)}, headers=headers)
+        try:
+            return r.status_code, r.json()
+        except Exception:
+            return r.status_code, {}
+
+    def png_bytes(w, h):
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), "red").save(buf, "PNG")
+        return buf.getvalue()
+
+    tmp = Path(tempfile.mkdtemp())
+    orig_uploads = _app._UPLOADS_DIR
+    _app._UPLOADS_DIR = tmp
+    saved = {k: getattr(_app, k) for k in ("_whisper_backend", "_get_user_id", "get_user_credits", "deduct_user_credits",
+                                           "_load_connections", "_local_whisper_transcribe")}
+    saved_post = httpx.AsyncClient.post
+    env_keys = ("WHISPER_URL", "WHISPER_API_KEY", "WHISPER_MODEL", "OPENAI_API_KEY")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    try:
+        # ── 1. The CSRF guard lets our own pages upload, and still blocks other sites ──
+        print("  -- CSRF guard --")
+        check("same-origin multipart upload is allowed", upload("a.txt", b"hi")[0] == 200)
+        check("cross-site multipart is refused", upload("a.txt", b"hi", {"Sec-Fetch-Site": "cross-site"})[0] == 403)
+        check("a multipart post with no browser headers is refused (curl, old browsers)", upload("a.txt", b"hi", {})[0] == 403)
+        check("Origin matching Host is accepted as a fallback",
+              upload("a.txt", b"hi", {"Origin": "http://testserver"})[0] == 200)
+        check("Origin from another host is refused",
+              upload("a.txt", b"hi", {"Origin": "http://evil.example"})[0] == 403)
+        check("a null Origin is refused", upload("a.txt", b"hi", {"Origin": "null"})[0] == 403)
+        check("JSON API posts are unaffected by the guard",
+              client.post("/api/chat/upload", json={"x": 1}).status_code != 403)
+
+        # ── 2. Upload: what each kind of file becomes ──
+        print("  -- /api/chat/upload --")
+        s, d = upload("photo.png", png_bytes(3000, 2000))
+        check("a PNG is stored as an image", s == 200 and d.get("kind") == "image" and d["url"].endswith(".png"), d)
+        check("stored under a chat_ name in the uploads dir",
+              d.get("url", "").startswith("/uploads/chat_") and (tmp / os.path.basename(d["url"])).is_file())
+        img_url = d["url"]
+        s, d = upload("fake.png", b"this is not a png")
+        check("garbage with a .png name is refused with a readable error", s == 400 and "isn't an image" in d.get("error", ""), d)
+        s, d = upload("script.py", b"print('hi')\n")
+        check("a code file becomes a .txt document", s == 200 and d.get("kind") == "doc" and d["url"].endswith(".txt") and d.get("chars") == 12, d)
+        s, d = upload("page.html", b"<script>alert(1)</script>")
+        check("HTML is stored as .txt, never served back as a page", s == 200 and d["url"].endswith(".txt"), d)
+        check("the stored text is the file's text", (tmp / os.path.basename(d["url"])).read_text(encoding="utf-8") == "<script>alert(1)</script>")
+        s, d = upload("virus.exe", b"MZ....")
+        check(".exe is refused and the error names the type", s == 400 and ".exe" in d.get("error", ""), d)
+        s, d = upload("noext", b"data")
+        check("a file with no extension is refused", s == 400, d)
+        s, d = upload("huge.txt", b"x" * (_app.MAX_CHAT_UPLOAD + 1))
+        check("over the size limit is 413 with the limit in MB", s == 413 and "MB" in d.get("error", ""), d)
+        s, d = upload("keep.md", "# héllo wörld".encode("utf-8"))
+        check("UTF-8 text keeps its characters", s == 200 and (tmp / os.path.basename(d["url"])).read_text(encoding="utf-8") == "# héllo wörld")
+        s, d = upload("latin.csv", b"caf\xe9")
+        check("undecodable bytes don't crash the upload", s == 200 and d.get("chars") == 4, d)
+
+        # PDFs: text pulled out with pypdf; scanned (no text) and broken ones get clear messages
+        try:
+            from pypdf import PdfWriter
+            w = PdfWriter(); w.add_blank_page(100, 100); b = io.BytesIO(); w.write(b)
+            s, d = upload("scan.pdf", b.getvalue())
+            check("a PDF with no text says 'scanned' and suggests images", s == 400 and "scanned" in d.get("error", "") and "images" in d.get("error", ""), d)
+            # A small, well-formed PDF with real text (objects + xref built by hand)
+            def text_pdf(text):
+                objs = [b"<</Type/Catalog/Pages 2 0 R>>",
+                        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+                        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+                        None,
+                        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+                stream = f"BT /F1 24 Tf 10 40 Td ({text}) Tj ET".encode()
+                objs[3] = b"<</Length " + str(len(stream)).encode() + b">>stream\n" + stream + b"\nendstream"
+                out = io.BytesIO(); out.write(b"%PDF-1.4\n"); offs = []
+                for i, o in enumerate(objs, 1):
+                    offs.append(out.tell()); out.write(f"{i} 0 obj\n".encode() + o + b"\nendobj\n")
+                xref = out.tell()
+                out.write(f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode())
+                for o in offs:
+                    out.write(f"{o:010d} 00000 n \n".encode())
+                out.write(f"trailer\n<</Size {len(objs) + 1}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n".encode())
+                return out.getvalue()
+            minimal = text_pdf("Purple elephant")
+            s, d = upload("notes.pdf", minimal)
+            check("a PDF with text becomes a document", s == 200 and d.get("kind") == "doc", d)
+            if s == 200:
+                body = (tmp / os.path.basename(d["url"])).read_text(encoding="utf-8")
+                check("the document is the PDF's text, page-numbered", "Purple elephant" in body and "[page 1]" in body, body[:80])
+            s, d = upload("broken.pdf", b"%PDF-1.4 nothing here")
+            check("a broken PDF is refused, not a 500", s == 400, (s, d))
+        except ImportError:
+            check("pypdf is installed (PDF attachments)", False, "pip install pypdf")
+
+        # ── 3. Images are inlined for the model (providers can't fetch our /uploads) ──
+        print("  -- vision inlining --")
+        part = _app._chat_image_part(img_url)
+        check("an uploaded image becomes a data-URI image part",
+              part and part["type"] == "image_url" and part["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+        if part:
+            raw = _b64decode(part["image_url"]["url"].split(",", 1)[1])
+            with Image.open(io.BytesIO(raw)) as im:
+                check("inlined image is downscaled to at most 1568px", max(im.size) <= 1568 and im.size == (1568, 1045), im.size)
+        check("a query string on the url doesn't break the lookup", _app._chat_image_part(img_url + "?w=200") is not None)
+        check("a missing upload gives None, not an exception", _app._chat_image_part("/uploads/chat_deadbeef.png") is None)
+        check("a non chat_ name under /uploads is not readable this way", _app._chat_image_part("/uploads/avatar_elysia.png") is None)
+        check("an https URL passes through untouched",
+              _app._chat_image_part("https://example.com/a.png") == {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}})
+        check("a data: URL passes through untouched", _app._chat_image_part("data:image/png;base64,AAAA")["image_url"]["url"] == "data:image/png;base64,AAAA")
+        check("http:// localhost links are refused (would leak nothing, work nowhere)", _app._chat_image_part("http://localhost:8989/x.png") is None)
+        check("the stream path inlines up to MAX_CHAT_IMAGES and appends to an existing content list",
+              "_chat_image_part(u) for u in req.images[:MAX_CHAT_IMAGES]" in src
+              and "content_parts = list(orig) if isinstance(orig, list) else" in src)
+        check("the old 'send the localhost URL' injection is gone", '"image_url": {"url": img_url}' not in src)
+
+        # ── 4. Document refs still validate (uploads dir only, chat_ prefix, text types) ──
+        s, d = upload("ref.md", b"# ref")
+        docs = _app._clean_chat_docs([{"url": d["url"], "name": "ref.md"}, {"url": "/etc/passwd"}, {"url": "/uploads/chat_zz.png"}, "junk"])
+        check("_clean_chat_docs keeps the real .txt ref and drops the rest", [x["name"] for x in docs] == ["ref.md"] and docs[0]["chars"] == 5, docs)
+
+        # ── 5. Whisper: which backend, and the endpoint ──
+        print("  -- Whisper --")
+        for k in env_keys:
+            os.environ.pop(k, None)
+        check("_whisper_url: bare host", _app._whisper_url("http://whisper:8000") == "http://whisper:8000/v1/audio/transcriptions")
+        check("_whisper_url: /v1 base", _app._whisper_url("https://api.groq.com/openai/v1/") == "https://api.groq.com/openai/v1/audio/transcriptions")
+        check("_whisper_url: full path untouched", _app._whisper_url("http://x/v1/audio/transcriptions") == "http://x/v1/audio/transcriptions")
+
+        conns = {"connections": []}
+        _app._load_connections = lambda: conns
+        def backend():
+            b = _app._whisper_backend()
+            return {k: v for k, v in (b or {}).items() if k != "api_key"} if b else None
+        try:
+            import faster_whisper  # noqa: F401
+            have_local = True
+        except ImportError:
+            have_local = False
+        b = backend()
+        check("no connections, no env: local faster-whisper if installed, else None",
+              (b or {}).get("local") is True if have_local else b is None, b)
+        os.environ["OPENAI_API_KEY"] = "sk-platform"
+        check("OPENAI_API_KEY env → OpenAI whisper-1, platform-metered",
+              backend() == {"url": "https://api.openai.com/v1", "model": "whisper-1", "platform": True}, backend())
+        conns["connections"] = [{"provider": "groq", "api_key": "g", "enabled": True}]
+        check("a Groq connection beats the env key, large-v3", backend()["model"] == "whisper-large-v3" and backend()["platform"] is False, backend())
+        conns["connections"].insert(0, {"provider": "openai", "api_key": "o", "url": "https://api.openai.com/v1", "enabled": True})
+        check("an OpenAI connection beats Groq", backend()["model"] == "whisper-1" and backend()["url"] == "https://api.openai.com/v1")
+        conns["connections"].append({"provider": "whisper", "url": "http://whisper.internal:8000", "models": ["small"], "enabled": True})
+        check("a dedicated whisper connection beats both", backend()["url"] == "http://whisper.internal:8000" and backend()["model"] == "small")
+        conns["connections"].append({"provider": "whisper", "url": "http://off", "enabled": False})
+        check("disabled connections are skipped", backend()["url"] == "http://whisper.internal:8000")
+        os.environ["WHISPER_URL"] = "http://env-whisper:8000"
+        os.environ["WHISPER_MODEL"] = "base.en"
+        check("WHISPER_URL env wins over everything", backend() == {"url": "http://env-whisper:8000", "model": "base.en", "platform": False}, backend())
+
+        # The endpoint, with a fake OpenAI-compatible server
+        seen = {}
+        reply = {"status": 200, "json": {"text": " hello there "}, "text": "ok"}
+        class _Resp:
+            status_code = property(lambda self: reply["status"])
+            text = property(lambda self: reply["text"])
+            def json(self): return reply["json"]
+        async def fake_post(self, url, headers=None, files=None, data=None, **kw):
+            seen.update(url=url, auth=(headers or {}).get("Authorization"), model=(data or {}).get("model"),
+                        fname=files["file"][0], nbytes=len(files["file"][1]))
+            return _Resp()
+        httpx.AsyncClient.post = fake_post
+        wav = b"RIFF" + b"\0" * 40 + b"\0" * 32000 * 8    # 8 s of 16 kHz mono 16-bit silence
+        charged = []
+        _app.deduct_user_credits = lambda uid, n, why: charged.append((uid, n, why))
+        _app.get_user_credits = lambda uid: 10 ** 6
+        def transcribe(data=wav, headers=SAME):
+            r = client.post("/api/chat/transcribe", files={"file": ("audio.wav", data, "audio/wav")}, headers=headers)
+            try:
+                return r.status_code, r.json()
+            except Exception:
+                return r.status_code, {}
+
+        _app._get_user_id = lambda req=None: "__local__"
+        s, d = transcribe()
+        check("WHISPER_URL backend: posts to /v1/audio/transcriptions with the model", s == 200 and seen["url"] == "http://env-whisper:8000/v1/audio/transcriptions" and seen["model"] == "base.en", (s, d, seen))
+        check("text is trimmed and seconds estimated from the WAV", d == {"text": "hello there", "seconds": 8.0}, d)
+        check("no key → no Authorization header", seen["auth"] is None)
+        check("the local user is never charged", charged == [])
+        check("cross-site posts to transcribe are refused", transcribe(headers={"Sec-Fetch-Site": "cross-site"})[0] == 403)
+
+        os.environ.pop("WHISPER_URL"); os.environ.pop("WHISPER_MODEL")
+        conns["connections"] = []
+        _app._get_user_id = lambda req=None: "user-42"
+        s, d = transcribe()
+        check("platform OpenAI key: bearer auth, whisper-1", s == 200 and seen["auth"] == "Bearer sk-platform" and seen["model"] == "whisper-1", seen)
+        check("a signed-in user is charged the STT rate for 8 s", charged == [("user-42", _app.estimate_stt_credit_cost(8.0, "whisper"), "stt:whisper:8s")], charged)
+        _app.get_user_credits = lambda uid: 0
+        s, d = transcribe()
+        check("not enough credits → 402 with a store redirect, nothing sent", s == 402 and d.get("redirect") == "/store", (s, d))
+        _app.get_user_credits = lambda uid: 10 ** 6
+        conns["connections"] = [{"provider": "openai", "api_key": "own-key", "enabled": True}]
+        charged.clear()
+        transcribe()
+        check("a user's own OpenAI key is not metered", charged == [] and seen["auth"] == "Bearer own-key", (charged, seen))
+        reply.update(status=500, text="boom")
+        s, d = transcribe()
+        check("an upstream error is a 502 with the status, not a crash", s == 502 and "500" in d.get("error", ""), (s, d))
+        reply.update(status=200)
+        check("a tiny chunk (under 1 KB) returns empty text without calling anyone", transcribe(b"RIFF" + b"\0" * 100) == (200, {"text": "", "seconds": 0}))
+        check("an oversize chunk is 413", transcribe(b"\0" * (_app.WHISPER_MAX_BYTES + 1))[0] == 413)
+        _app._whisper_backend = lambda: None
+        s, d = transcribe()
+        check("no backend at all → 503 flagged no_backend, with setup advice", s == 503 and d.get("no_backend") is True and "faster-whisper" in d.get("error", ""), (s, d))
+        _app._whisper_backend = saved["_whisper_backend"]
+        async def exploding_post(self, *a, **kw):
+            raise httpx.ConnectError("refused")
+        httpx.AsyncClient.post = exploding_post
+        s, d = transcribe()
+        check("a connection failure is a 502 'Whisper failed'", s == 502 and "Whisper failed" in d.get("error", ""), (s, d))
+        # The in-process path, without loading a model
+        _app._load_connections = lambda: {"connections": []}
+        os.environ.pop("OPENAI_API_KEY", None)
+        if have_local:
+            _app._local_whisper_transcribe = lambda wav_bytes, model: f"local:{model}:{len(wav_bytes)}"
+            s, d = transcribe()
+            check("in-process faster-whisper path runs off the thread and returns its text", s == 200 and d["text"].startswith("local:base:"), (s, d))
+        check("local path tries the cached model first and only then allows one download",
+              "local_files_only=True" in src and "_hf.HF_HUB_OFFLINE = prev" in src)
+
+        # ── 6. The page: what the browser does ──
+        print("  -- chat.html --")
+        m = re.search(r'id="attach-input"[^>]*accept="([^"]+)"', html)
+        acc = m.group(1) if m else ""
+        check("the picker accepts images, videos, PDFs, text and code", all(x in acc for x in ("image/*", "video/*", ".pdf", ".py", ".csv", ".md")), acc)
+        check("the picker allows several files", "multiple" in (m.group(0) if m else ""))
+        for name in ("function addAttachments(", "function _videoFrames(", "function _videoSpeech(", "function _wavBlob(",
+                     "async function _uploadAttachment(", "function _attachWarn(", "function renderAttachPreview("):
+            check(f"page defines {name}", name in html)
+        check("frames and speech are produced together per video", "_videoSpeech(f, duration).catch(" in html and "Promise.all(frames.map(fr => _uploadAttachment(fr.file)))" in html)
+        check("uploads run in parallel, not one at a time", "await Promise.all(files.map(async f =>" in html)
+        check("audio goes to /api/chat/transcribe as WAV chunks", "fetch('/api/chat/transcribe'" in html and "WHISPER_CHUNK_SEC = 600" in html and "WHISPER_RATE = 16000" in html)
+        check("the message tells the model what each video carries",
+              "' attached as images, in order'" in html and "spoken audio transcribed by Whisper (attached)" in html
+              and "'; audio: ' + r.speech.none" in html)
+        check("the transcript is attached as a document", "' - transcript.txt'" in html and "docRefs.push({ url: r.speech.doc.url" in html)
+        check("failed files stay in the tray with the reason", "_attachedFiles = failed.filter(r => r.f).map(r => r.f);" in html and "_attachWarn(failed.map(r => r.error).join(' · '))" in html)
+        check("drag & drop onto the compose box", "box.addEventListener('drop'" in html and "addAttachments(e.dataTransfer.files)" in html)
+        check("pasted screenshots become attachments", "if (cd && cd.files && cd.files.length) {" in html and "'pasted-'" in html)
+        check("image chips show a thumbnail", "URL.createObjectURL(f)" in html and ".attach-chip img" in html)
+        check("a video with a silent or missing soundtrack is reported, not sent to Whisper",
+              "return { none: 'no audio track' }" in html and "return { none: 'silent' }" in html)
+        check("duplicates are skipped and the count is capped", "MAX_ATTACHMENTS = 20" in html and "g.lastModified === f.lastModified" in html)
+        js_images = re.search(r"const MAX_CHAT_IMAGES = (\d+);", html)
+        check("MAX_CHAT_IMAGES in sync between page and server", js_images and int(js_images.group(1)) == _app.MAX_CHAT_IMAGES, js_images and js_images.group(1))
+        js_bytes = re.search(r"const MAX_ATTACH_BYTES = (\d+) \* 1024 \* 1024;", html)
+        check("MAX_ATTACH_BYTES in sync with MAX_CHAT_UPLOAD", js_bytes and int(js_bytes.group(1)) * 1048576 == _app.MAX_CHAT_UPLOAD)
+        check("video frames are capped so several videos still fit", "Math.min(12, Math.floor((MAX_CHAT_IMAGES" in html and "imageUrls.length = MAX_CHAT_IMAGES;" in html)
+        check("the old one-at-a-time loop with the swallowed error is gone", "} catch(_) {}\n    }\n    _attachedFiles = [];" not in html.replace("\r\n", "\n"))
+
+        # ── 7. Dependencies ──
+        for req in ("requirements.txt", "../requirements.txt", "../requirements.fly.txt"):
+            p = (ui / req).resolve()
+            if p.is_file():
+                check(f"{p.name}: pypdf listed ({req})", "pypdf" in p.read_text(encoding="utf-8"))
+    finally:
+        _app._UPLOADS_DIR = orig_uploads
+        for k, v in saved.items():
+            setattr(_app, k, v)
+        httpx.AsyncClient.post = saved_post
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        _app._TTL_CACHE.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _b64decode(s):
+    import base64
+    return base64.b64decode(s)
+
+
 if __name__ == "__main__":
     test_boundary_policy()
     test_pii_guard_extended()
@@ -13621,6 +13921,8 @@ if __name__ == "__main__":
     test_agi_loop_narrated_tool_calls()
     test_agi_loop_hud_on_linux_and_local_day()
     test_loop_pages_stay_light()
+
+    test_chat_attachments()
 
     print(f"\n{'='*40}")
     print(f"Results: {PASS} passed, {FAIL} failed")
