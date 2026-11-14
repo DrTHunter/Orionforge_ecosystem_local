@@ -440,6 +440,10 @@
     font-size: 0.85rem; padding: 0; line-height: 1;
   }
   .attach-chip button:hover { color: #ef4444; }
+  .attach-chip img { width: 1.5rem; height: 1.5rem; object-fit: cover; border-radius: 0.25rem; flex-shrink: 0; }
+  .attach-notice { display: none; padding: 0.3rem 0.75rem; font-size: 0.75rem; color: #fca5a5; border-top: 1px solid rgba(42,42,58,0.5); }
+  .attach-notice.show { display: block; }
+  .compose-box.drag-over { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.25); }
 
   .compose-toolbar {
     display: flex; align-items: center; gap: 0.5rem;
@@ -1061,14 +1065,15 @@
             </div>
           </div>
           <div class="attach-preview" id="attach-preview"></div>
+          <div class="attach-notice" id="attach-notice"></div>
           <div class="compose-toolbar">
-            <button type="button" class="attach-btn" onclick="document.getElementById('attach-input').click()" title="Attach image or file">📎</button>
-            <input type="file" id="attach-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.yaml,.yml" style="display:none" onchange="handleAttach(this)">
+            <button type="button" class="attach-btn" onclick="document.getElementById('attach-input').click()" title="Attach photos, videos or files (or drag & drop / paste)">📎</button>
+            <input type="file" id="attach-input" multiple accept="image/*,video/*,.pdf,.txt,.md,.csv,.tsv,.json,.yaml,.yml,.xml,.log,.ini,.toml,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,.sh,.ps1,.java,.c,.cpp,.h,.go,.rs,.rb,.php" style="display:none" onchange="handleAttach(this)">
             <button type="button" class="tb-mobile-toggle" id="btn-tb-menu" onclick="toggleToolbarMenu(event)" title="Options">+</button>
             <div class="tb-collapsible" id="tb-collapsible">
               <button type="button" class="tb-sheet-close" onclick="closeToolbarMenu(event)" aria-label="Close options" title="Close options">&times;</button>
               <!-- Mobile-only: attach trigger inside the action sheet (paperclip is hidden in the bar) -->
-              <button type="button" class="attach-btn-sheet" style="display:none" onclick="document.getElementById('attach-input').click(); closeToolbarMenu(event);">📎 <span>Attach image or file</span></button>
+              <button type="button" class="attach-btn-sheet" style="display:none" onclick="document.getElementById('attach-input').click(); closeToolbarMenu(event);">📎 <span>Attach photos, videos or files</span></button>
               <!-- STT provider toggle hidden; ElevenLabs is the sole provider -->
               <button type="button" onclick="toggleSTTProvider()" id="btn-stt" class="tb stt-toggle on-elevenlabs" title="STT: ElevenLabs" style="display:none">
                 <span class="stt-dot"></span><span id="stt-label">🎤 ElevenLabs</span>
@@ -1870,10 +1875,106 @@ function closeToolbarMenu(event) {
   if (event) event.stopPropagation();
   syncToolbarMenuState(false);
 }
-function handleAttach(input) {
-  for (const f of input.files) _attachedFiles.push(f);
-  input.value = '';
+// ── Attachments: photos, videos (sent as sampled frames), PDFs, text and code files ──
+const MAX_ATTACHMENTS = 20;
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024;      // keep in sync with MAX_CHAT_UPLOAD in app.py
+const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // videos stay in the browser; only frames are uploaded
+const MAX_CHAT_IMAGES = 40;                     // keep in sync with app.py
+const _VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|ogv|mkv|avi)$/i;
+function _isVideo(f) { return (f.type || '').startsWith('video/') || _VIDEO_EXT_RE.test(f.name || ''); }
+function _isImage(f) { return (f.type || '').startsWith('image/'); }
+function _fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)).toLocaleString() + ' KB'; }
+function _fmtTime(t) { t = Math.max(0, Math.round(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+let _attachNoticeTimer = null;
+function _attachWarn(msg) {
+  const el = document.getElementById('attach-notice');
+  if (!el) return alert(msg);
+  el.textContent = '⚠️ ' + msg;
+  el.classList.add('show');
+  clearTimeout(_attachNoticeTimer);
+  _attachNoticeTimer = setTimeout(() => el.classList.remove('show'), 9000);
+}
+function addAttachments(list) {
+  const problems = [];
+  for (const f of Array.from(list || [])) {
+    if (_attachedFiles.length >= MAX_ATTACHMENTS) { problems.push('up to ' + MAX_ATTACHMENTS + ' attachments per message'); break; }
+    const limit = _isVideo(f) ? MAX_VIDEO_BYTES : MAX_ATTACH_BYTES;
+    if (f.size > limit) { problems.push(f.name + ' is over ' + _fmtSize(limit)); continue; }
+    if (_attachedFiles.some(g => g.name === f.name && g.size === f.size && g.lastModified === f.lastModified)) continue;
+    _attachedFiles.push(f);
+  }
+  if (problems.length) _attachWarn(problems.join(' · '));
   renderAttachPreview();
+}
+function handleAttach(input) {
+  addAttachments(input.files);
+  input.value = '';
+}
+// Drag & drop files anywhere onto the compose box
+(function () {
+  const box = document.querySelector('.compose-box');
+  if (!box) return;
+  const hasFiles = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  box.addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); box.classList.add('drag-over'); });
+  box.addEventListener('dragleave', e => { if (!box.contains(e.relatedTarget)) box.classList.remove('drag-over'); });
+  box.addEventListener('drop', e => {
+    box.classList.remove('drag-over');
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    addAttachments(e.dataTransfer.files);
+  });
+})();
+// Sample evenly spaced frames from a video in the browser → [{file, t}], duration
+function _videoFrames(file, count) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    let settled = false;
+    const done = (err, out) => {
+      if (settled) return; settled = true;
+      URL.revokeObjectURL(url); v.removeAttribute('src'); try { v.load(); } catch (_) {}
+      err ? reject(err) : resolve(out);
+    };
+    const waitFor = (ev, ms) => new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('timed out reading ' + file.name)), ms);
+      v.addEventListener(ev, () => { clearTimeout(to); res(); }, { once: true });
+    });
+    v.onerror = () => done(new Error("this browser can't play " + file.name + ' (try MP4 or WebM)'));
+    v.onloadedmetadata = async () => {
+      try {
+        const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+        if (v.readyState < 2) await waitFor('loadeddata', 20000);
+        const w = v.videoWidth || 640, h = v.videoHeight || 360;
+        const scale = Math.min(1, 1024 / Math.max(w, h));
+        const c = document.createElement('canvas');
+        c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+        const ctx = c.getContext('2d');
+        const n = dur ? count : 1;
+        const base = file.name.replace(/\.[^.]+$/, '');
+        const frames = [];
+        for (let i = 0; i < n; i++) {
+          const t = dur ? (dur * (i + 0.5)) / n : 0;
+          if (dur) { const seeked = waitFor('seeked', 20000); v.currentTime = t; await seeked; }
+          ctx.drawImage(v, 0, 0, c.width, c.height);
+          const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+          if (!blob) throw new Error('could not capture a frame from ' + file.name);
+          frames.push({ file: new File([blob], base + '-frame' + (i + 1) + '.jpg', { type: 'image/jpeg' }), t });
+        }
+        done(null, { frames, duration: dur });
+      } catch (e) { done(e); }
+    };
+    v.src = url;
+  });
+}
+async function _uploadAttachment(f) {
+  const fd = new FormData();
+  fd.append('file', f, f.name);
+  const r = await fetch('/api/chat/upload', { method: 'POST', body: fd });
+  let d = {};
+  try { d = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(d.error || (f.name + ': upload failed (HTTP ' + r.status + ')'));
+  return d;
 }
 const LONG_TEXT_DOC_THRESHOLD = 30000;   // keep in sync with LONG_TEXT_DOC_THRESHOLD in app.py
 const _DOC_EXT_RE = /\.(txt|md|csv|json|ya?ml)$/i;
@@ -1887,7 +1988,15 @@ function _docNote(docs) {
 document.addEventListener('paste', (e) => {
   const ta = document.getElementById('chat-stimulus');
   if (!ta || e.target !== ta) return;
-  const text = e.clipboardData && e.clipboardData.getData('text/plain');
+  const cd = e.clipboardData;
+  if (cd && cd.files && cd.files.length) {   // pasted screenshots / copied files
+    e.preventDefault();
+    addAttachments(Array.from(cd.files).map((f, i) =>
+      f.name && f.name !== 'image.png' ? f
+        : new File([f], 'pasted-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + (i ? '-' + i : '') + '.' + ((f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')), { type: f.type })));
+    return;
+  }
+  const text = cd && cd.getData('text/plain');
   if (!text || text.length <= LONG_TEXT_DOC_THRESHOLD) return;
   e.preventDefault();
   _attachedFiles.push(_textAsDocFile(text));
@@ -1897,15 +2006,33 @@ function removeAttach(idx) {
   _attachedFiles.splice(idx, 1);
   renderAttachPreview();
 }
+const _attachThumbs = new WeakMap();
 function renderAttachPreview() {
   const el = document.getElementById('attach-preview');
   if (!_attachedFiles.length) { el.className = 'attach-preview'; el.innerHTML = ''; return; }
   el.className = 'attach-preview has-files';
-  el.innerHTML = _attachedFiles.map((f, i) => {
-    const icon = f.type.startsWith('image/') ? '🖼️' : '📄';
-    const sz = f.size > 1024 ? ' · ' + Math.round(f.size / 1024).toLocaleString() + ' KB' : '';
-    return `<div class="attach-chip">${icon}<span>${f.name}${sz}</span><button onclick="removeAttach(${i})">&times;</button></div>`;
-  }).join('');
+  el.innerHTML = '';
+  _attachedFiles.forEach((f, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    chip.title = f.name;
+    if (_isImage(f)) {
+      if (!_attachThumbs.has(f)) _attachThumbs.set(f, URL.createObjectURL(f));
+      const img = document.createElement('img');
+      img.src = _attachThumbs.get(f); img.alt = '';
+      img.onerror = () => img.replaceWith('🖼️');
+      chip.appendChild(img);
+    } else {
+      chip.appendChild(document.createTextNode(_isVideo(f) ? '🎬' : '📄'));
+    }
+    const label = document.createElement('span');
+    label.textContent = f.name + ' · ' + _fmtSize(f.size);
+    const x = document.createElement('button');
+    x.type = 'button'; x.innerHTML = '&times;'; x.title = 'Remove';
+    x.onclick = () => removeAttach(i);
+    chip.append(label, x);
+    el.appendChild(chip);
+  });
 }
 
 document.addEventListener('click', (event) => {
@@ -3122,25 +3249,56 @@ async function sendChatMsg() {
     stim = '';
   }
 
-  // Upload attached files
+  // Upload attached files in parallel; videos go up as evenly spaced frames
   const imageUrls = [];
   const docRefs = [];
+  const mediaNotes = [];
   if (_attachedFiles.length) {
-    for (const f of _attachedFiles) {
-      const fd = new FormData();
-      fd.append('file', f);
+    const files = _attachedFiles;
+    const stimEl = document.getElementById('chat-stimulus');
+    stimEl.disabled = true;
+    const status = document.getElementById('attach-notice');
+    if (status) { status.textContent = '⏳ Preparing ' + files.length + ' attachment' + (files.length > 1 ? 's' : '') + '…'; status.classList.add('show'); }
+    const stills = files.filter(f => !_isVideo(f)).length;
+    const nVideos = files.length - stills;
+    const perVideo = nVideos ? Math.max(2, Math.min(12, Math.floor((MAX_CHAT_IMAGES - Math.min(stills, MAX_CHAT_IMAGES - 2 * nVideos)) / nVideos))) : 0;
+    const results = await Promise.all(files.map(async f => {
       try {
-        const r = await fetch('/api/chat/upload', { method: 'POST', body: fd });
-        if (r.ok) {
-          const d = await r.json();
-          if (f.type.startsWith('image/')) imageUrls.push(window.location.origin + d.url);
-          else if (_DOC_EXT_RE.test(f.name)) docRefs.push({ url: d.url, name: f.name });
+        if (_isVideo(f)) {
+          const { frames, duration } = await _videoFrames(f, perVideo);
+          const ups = await Promise.all(frames.map(fr => _uploadAttachment(fr.file)));
+          return { kind: 'video', f, urls: ups.map(u => u.url), times: frames.map(fr => fr.t), duration };
         }
-      } catch(_) {}
+        return { kind: 'file', f, d: await _uploadAttachment(f) };
+      } catch (e) { return { kind: 'error', f, error: (e && e.message) || String(e) }; }
+    }));
+    stimEl.disabled = false;
+    if (status) status.classList.remove('show');
+    const failed = [];
+    for (const r of results) {
+      if (r.kind === 'error') { failed.push(r); continue; }
+      if (r.kind === 'video') {
+        imageUrls.push(...r.urls);
+        mediaNotes.push('🎬 ' + r.f.name + (r.duration ? ' (' + _fmtTime(r.duration) + ')' : '') + ' — '
+          + r.urls.length + ' frame' + (r.urls.length > 1 ? 's' : '') + ' attached as images, in order'
+          + (r.duration ? ', at ' + r.times.map(t => r.duration < 60 ? t.toFixed(1) + 's' : _fmtTime(t)).join(', ') : ''));
+      } else if (r.d.kind === 'image' || (!r.d.kind && _isImage(r.f))) {
+        imageUrls.push(r.d.url);
+        mediaNotes.push('🖼️ ' + r.f.name);
+      } else {
+        docRefs.push({ url: r.d.url, name: r.f.name, chars: r.d.chars });
+      }
     }
-    _attachedFiles = [];
+    if (imageUrls.length > MAX_CHAT_IMAGES) {
+      imageUrls.length = MAX_CHAT_IMAGES;
+      failed.push({ error: 'only the first ' + MAX_CHAT_IMAGES + ' images/frames were sent' });
+    }
+    _attachedFiles = failed.filter(r => r.f).map(r => r.f);   // keep failures so you can retry or remove them
     renderAttachPreview();
+    if (failed.length) _attachWarn(failed.map(r => r.error).join(' · '));
+    if (!imageUrls.length && !docRefs.length && !stim) return;
   }
+  if (mediaNotes.length) stim = [stim, mediaNotes.join('\n')].filter(Boolean).join('\n\n');
 
   const payload = {
     agent,

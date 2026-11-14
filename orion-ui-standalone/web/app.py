@@ -603,6 +603,21 @@ app.add_middleware(AuthMiddleware)
 # are exempt (they use signature verification).
 _CSRF_EXEMPT = {"/api/stripe/webhook", "/api/stt/elevenlabs"}
 
+def _same_origin(request: Request) -> bool:
+    """True when the browser says this request came from our own pages (file uploads).
+
+    Sec-Fetch-Site is set by every current browser and can't be forged by a page;
+    Origin is the fallback. A cross-site form post has neither matching."""
+    site = (request.headers.get("sec-fetch-site") or "").lower()
+    if site:
+        return site == "same-origin"
+    origin = request.headers.get("origin") or ""
+    if not origin or origin == "null":
+        return False
+    from urllib.parse import urlsplit
+    return urlsplit(origin).netloc.lower() == (request.headers.get("host") or "").lower()
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -610,7 +625,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/") and path not in _CSRF_EXEMPT:
                 ct = (request.headers.get("content-type") or "").lower()
                 # Block cross-origin form-encoded submissions
-                if "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
+                if ("application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct)                         and not _same_origin(request):
                     return JSONResponse(
                         {"error": "CSRF validation failed — form submissions not allowed on API routes"},
                         status_code=403,
@@ -5219,22 +5234,96 @@ def _spill_long_stimulus(req) -> None:
     req.stimulus = "(see attached document)"
 
 
+_CHAT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp"}
+# Text and code files are stored as .txt (never served back as .html/.js from our origin)
+_CHAT_TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".log",
+                   ".ini", ".toml", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css",
+                   ".sql", ".sh", ".ps1", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".rb", ".php"}
+MAX_CHAT_UPLOAD = 25 * 1024 * 1024
+MAX_CHAT_IMAGES = 40   # per message, video frames included
+
+
+def _pdf_text(data: bytes) -> str | None:
+    """Text of a PDF, page by page; None when pypdf isn't installed or the file can't be parsed."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return None
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        pages = []
+        for i, page in enumerate(reader.pages, 1):
+            text = (page.extract_text() or "").strip()
+            if text:
+                pages.append(f"[page {i}]\n{text}")
+        return "\n\n".join(pages)
+    except Exception as exc:
+        log.warning("[chat-upload] PDF parse failed: %s", exc)
+        return None
+
+
+def _chat_image_part(url) -> dict | None:
+    """An attached image as a vision content part, inlined as a data URI.
+
+    The model's provider can't fetch our /uploads (localhost, or behind sign-in), so the
+    file is read here, downscaled to 1568px and sent as JPEG. None if it can't be read."""
+    s = str(url or "")
+    if s.startswith("data:image/"):
+        return {"type": "image_url", "image_url": {"url": s}}
+    fname = os.path.basename(s.split("?")[0])
+    path = _UPLOADS_DIR / fname
+    if not fname.startswith("chat_") or not path.is_file():
+        return {"type": "image_url", "image_url": {"url": s}} if s.startswith("https://") else None
+    try:
+        import io
+        from PIL import Image, ImageOps
+        with Image.open(path) as im:
+            if getattr(im, "is_animated", False):
+                im.seek(0)
+            im = ImageOps.exif_transpose(im).convert("RGB")
+            im.thumbnail((1568, 1568))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=85)
+    except Exception as exc:
+        log.warning("[chat] could not read attached image %s: %s", fname, exc)
+        return None
+    return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + _b64.b64encode(buf.getvalue()).decode()}}
+
+
 @app.post("/api/chat/upload")
 async def api_chat_upload(file: UploadFile = File(...)):
-    """Upload a file for use in chat (images, text docs)."""
-    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif",
-               ".pdf", ".txt", ".md", ".csv", ".json", ".yaml", ".yml"}
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in allowed:
-        return JSONResponse({"error": f"File type {ext} not allowed"}, 400)
-    safe_name = f"chat_{uuid.uuid4().hex[:8]}{ext}"
-    dest = _UPLOADS_DIR / safe_name
+    """Upload one chat attachment. Images are kept as images; PDFs and text/code files
+    become .txt documents. Returns {url, name, kind: image|doc, chars?}."""
+    name = file.filename or "file"
+    ext = os.path.splitext(name)[1].lower()
     content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        return JSONResponse({"error": "File too large (max 20MB)"}, 400)
-    with open(dest, "wb") as f:
-        f.write(content)
-    return JSONResponse({"url": f"/uploads/{safe_name}", "name": file.filename, "type": file.content_type})
+    if len(content) > MAX_CHAT_UPLOAD:
+        return JSONResponse({"error": f"{name} is too large (max {MAX_CHAT_UPLOAD // 1048576} MB)"}, 413)
+    if ext in _CHAT_IMAGE_EXTS:
+        try:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(content)) as im:
+                im.verify()
+        except Exception:
+            return JSONResponse({"error": f"{name} isn't an image this server can read"}, 400)
+        safe_name = f"chat_{uuid.uuid4().hex[:8]}{ext}"
+        (_UPLOADS_DIR / safe_name).write_bytes(content)
+        return JSONResponse({"url": f"/uploads/{safe_name}", "name": name, "kind": "image", "type": file.content_type})
+    if ext == ".pdf":
+        text = await asyncio.to_thread(_pdf_text, content)
+        if text is None:
+            return JSONResponse({"error": f"Couldn't read {name} (PDF reading needs the pypdf package, or the file is damaged)"}, 400)
+        if not text.strip():
+            return JSONResponse({"error": f"{name} has no selectable text (a scanned PDF?) - attach the pages as images instead"}, 400)
+    elif ext in _CHAT_TEXT_EXTS:
+        text = content.decode("utf-8", errors="replace")
+    else:
+        return JSONResponse({"error": f"{name}: {ext or 'this'} file type isn't supported"}, 400)
+    safe_name = f"chat_{uuid.uuid4().hex[:8]}.txt"
+    (_UPLOADS_DIR / safe_name).write_text(text, encoding="utf-8")
+    return JSONResponse({"url": f"/uploads/{safe_name}", "name": name, "kind": "doc", "chars": len(text)})
 
 
 class FolderCreate(BaseModel):
@@ -5855,15 +5944,15 @@ async def _stream_chat_generator(req: ChatRequest, request: Request, user, conn,
 
     running_messages = list(llm_messages)
 
-    # ── Inject attached images into the last user message (vision) ──
+    # ── Inject attached images (and video frames) into the last user message (vision) ──
     if req.images:
+        _img_parts = [p for p in await asyncio.to_thread(
+            lambda: [_chat_image_part(u) for u in req.images[:MAX_CHAT_IMAGES]]) if p]
         for i in range(len(running_messages) - 1, -1, -1):
-            if running_messages[i].get("role") == "user":
+            if _img_parts and running_messages[i].get("role") == "user":
                 orig = running_messages[i].get("content", "")
-                content_parts = [{"type": "text", "text": orig}]
-                for img_url in req.images:
-                    content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-                running_messages[i] = {"role": "user", "content": content_parts}
+                content_parts = list(orig) if isinstance(orig, list) else [{"type": "text", "text": orig}]
+                running_messages[i] = {"role": "user", "content": content_parts + _img_parts}
                 break
 
     full_response = ""   # accumulate final response text (for saving to chat)

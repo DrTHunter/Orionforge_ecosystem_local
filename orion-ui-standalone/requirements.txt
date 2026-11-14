@@ -25,3 +25,4 @@ sentence-transformers>=2.2.0
 
 # MCP — hosted per-user connector (remote streamable-HTTP transport mounted at /mcp)
 mcp>=1.12
+pypdf>=4.0.0

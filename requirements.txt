@@ -22,3 +22,4 @@ stripe>=7.0.0
 # FAISS vector memory system
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.0
+pypdf>=4.0.0
