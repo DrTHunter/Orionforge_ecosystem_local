@@ -1967,6 +1967,52 @@ function _videoFrames(file, count) {
     v.src = url;
   });
 }
+// ── Whisper: the spoken words in a video ──
+// Decode the soundtrack in the browser, mix it to 16 kHz mono and post it in ≤10-minute WAV
+// chunks to /api/chat/transcribe. Returns {text} | {none: reason} | {skipped: reason}.
+const WHISPER_RATE = 16000, WHISPER_CHUNK_SEC = 600;
+const MAX_TRANSCRIBE_BYTES = 600 * 1024 * 1024, MAX_TRANSCRIBE_SEC = 2 * 3600;
+function _wavBlob(samples, rate) {
+  const b = new ArrayBuffer(44 + samples.length * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([b], { type: 'audio/wav' });
+}
+async function _videoSpeech(file, duration) {
+  if (file.size > MAX_TRANSCRIBE_BYTES || duration > MAX_TRANSCRIBE_SEC) return { skipped: 'too long to transcribe' };
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try { decoded = await ctx.decodeAudioData(await file.arrayBuffer()); }
+  catch (_) { return { none: 'no audio track' }; }
+  finally { try { ctx.close(); } catch (_) {} }
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * WHISPER_RATE)), WHISPER_RATE);
+  const src = off.createBufferSource();
+  src.buffer = decoded; src.connect(off.destination); src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i += 160) peak = Math.max(peak, Math.abs(pcm[i]));
+  if (peak < 0.01) return { none: 'silent' };
+  const step = WHISPER_RATE * WHISPER_CHUNK_SEC, chunks = [];
+  for (let s = 0; s < pcm.length; s += step) chunks.push({ start: s / WHISPER_RATE, wav: _wavBlob(pcm.subarray(s, s + step), WHISPER_RATE) });
+  const texts = await Promise.all(chunks.map(async c => {
+    const fd = new FormData();
+    fd.append('file', c.wav, 'audio.wav');
+    const r = await fetch('/api/chat/transcribe', { method: 'POST', body: fd });
+    let d = {};
+    try { d = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(d.error || 'transcription failed (HTTP ' + r.status + ')');
+    return (d.text || '').trim() ? (chunks.length > 1 ? '[' + _fmtTime(c.start) + '] ' : '') + d.text.trim() : '';
+  }));
+  const text = texts.filter(Boolean).join('\n\n');
+  return text ? { text } : { none: 'no speech' };
+}
 async function _uploadAttachment(f) {
   const fd = new FormData();
   fd.append('file', f, f.name);
@@ -3258,16 +3304,26 @@ async function sendChatMsg() {
     const stimEl = document.getElementById('chat-stimulus');
     stimEl.disabled = true;
     const status = document.getElementById('attach-notice');
-    if (status) { status.textContent = '⏳ Preparing ' + files.length + ' attachment' + (files.length > 1 ? 's' : '') + '…'; status.classList.add('show'); }
     const stills = files.filter(f => !_isVideo(f)).length;
+    if (status) { status.textContent = '⏳ Preparing ' + files.length + ' attachment' + (files.length > 1 ? 's' : '') + (stills < files.length ? ' (transcribing video audio with Whisper)' : '') + '…'; status.classList.add('show'); }
     const nVideos = files.length - stills;
     const perVideo = nVideos ? Math.max(2, Math.min(12, Math.floor((MAX_CHAT_IMAGES - Math.min(stills, MAX_CHAT_IMAGES - 2 * nVideos)) / nVideos))) : 0;
     const results = await Promise.all(files.map(async f => {
       try {
         if (_isVideo(f)) {
           const { frames, duration } = await _videoFrames(f, perVideo);
-          const ups = await Promise.all(frames.map(fr => _uploadAttachment(fr.file)));
-          return { kind: 'video', f, urls: ups.map(u => u.url), times: frames.map(fr => fr.t), duration };
+          const [ups, speech] = await Promise.all([
+            Promise.all(frames.map(fr => _uploadAttachment(fr.file))),
+            _videoSpeech(f, duration).catch(e => ({ error: (e && e.message) || String(e) })),
+          ]);
+          if (speech.text) {
+            const name = f.name.replace(/\.[^.]+$/, '') + ' - transcript.txt';
+            try {
+              speech.doc = await _uploadAttachment(new File(['Transcript of the audio in ' + f.name + ' (Whisper)\n\n' + speech.text], name, { type: 'text/plain' }));
+              speech.doc.name = name;
+            } catch (e) { speech.error = (e && e.message) || String(e); }
+          }
+          return { kind: 'video', f, urls: ups.map(u => u.url), times: frames.map(fr => fr.t), duration, speech };
         }
         return { kind: 'file', f, d: await _uploadAttachment(f) };
       } catch (e) { return { kind: 'error', f, error: (e && e.message) || String(e) }; }
@@ -3281,7 +3337,13 @@ async function sendChatMsg() {
         imageUrls.push(...r.urls);
         mediaNotes.push('🎬 ' + r.f.name + (r.duration ? ' (' + _fmtTime(r.duration) + ')' : '') + ' — '
           + r.urls.length + ' frame' + (r.urls.length > 1 ? 's' : '') + ' attached as images, in order'
-          + (r.duration ? ', at ' + r.times.map(t => r.duration < 60 ? t.toFixed(1) + 's' : _fmtTime(t)).join(', ') : ''));
+          + (r.duration ? ', at ' + r.times.map(t => r.duration < 60 ? t.toFixed(1) + 's' : _fmtTime(t)).join(', ') : '')
+          + (r.speech.doc ? '; spoken audio transcribed by Whisper (attached)'
+            : r.speech.none ? '; audio: ' + r.speech.none
+            : r.speech.skipped ? '; audio not transcribed (' + r.speech.skipped + ')'
+            : '; audio not transcribed'));
+        if (r.speech.doc) docRefs.push({ url: r.speech.doc.url, name: r.speech.doc.name, chars: r.speech.doc.chars });
+        if (r.speech.error) failed.push({ error: r.f.name + ' audio: ' + r.speech.error });
       } else if (r.d.kind === 'image' || (!r.d.kind && _isImage(r.f))) {
         imageUrls.push(r.d.url);
         mediaNotes.push('🖼️ ' + r.f.name);

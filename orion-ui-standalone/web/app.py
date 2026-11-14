@@ -5326,6 +5326,125 @@ async def api_chat_upload(file: UploadFile = File(...)):
     return JSONResponse({"url": f"/uploads/{safe_name}", "name": name, "kind": "doc", "chars": len(text)})
 
 
+# ── Whisper: the spoken words in attached videos ─────────────────
+# The browser pulls a video's soundtrack out as 16 kHz mono WAV, in chunks of up to
+# 10 minutes (~19 MB), and posts each one here.
+WHISPER_MAX_BYTES = 24 * 1024 * 1024   # OpenAI's limit is 25 MB per request
+_local_whisper = None
+_local_whisper_lock = threading.Lock()
+
+
+def _whisper_backend() -> dict | None:
+    """Where video audio is transcribed, first match wins:
+
+    1. WHISPER_URL env (+ WHISPER_API_KEY, WHISPER_MODEL): any OpenAI-compatible server,
+       e.g. services/whisper
+    2. a connection with provider "whisper"
+    3. an OpenAI connection (whisper-1) or a Groq one (whisper-large-v3)
+    4. OPENAI_API_KEY env: the platform key, metered in credits
+    5. faster-whisper installed in this Python: runs on this machine
+    Returns {url, api_key, model, platform} or {local, model, platform}, or None."""
+    url = os.environ.get("WHISPER_URL", "").strip()
+    if url:
+        return {"url": url, "api_key": os.environ.get("WHISPER_API_KEY", "").strip(),
+                "model": os.environ.get("WHISPER_MODEL", "whisper-1"), "platform": False}
+    conns = [c for c in _load_connections().get("connections", []) if c.get("enabled", True)]
+    for c in conns:
+        if c.get("provider") == "whisper" and c.get("url"):
+            return {"url": c["url"], "api_key": c.get("api_key", ""),
+                    "model": c.get("model") or (c.get("models") or ["whisper-1"])[0],
+                    "platform": bool(c.get("platform_hosted"))}
+    for provider, base, model in (("openai", "https://api.openai.com/v1", "whisper-1"),
+                                  ("groq", "https://api.groq.com/openai/v1", "whisper-large-v3")):
+        for c in conns:
+            if c.get("provider") == provider and c.get("api_key"):
+                return {"url": c.get("url") or base, "api_key": c["api_key"], "model": model,
+                        "platform": bool(c.get("platform_hosted"))}
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if key:
+        return {"url": "https://api.openai.com/v1", "api_key": key, "model": "whisper-1", "platform": True}
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return None
+    return {"local": True, "model": os.environ.get("WHISPER_MODEL", "base"), "platform": False}
+
+
+def _whisper_url(base: str) -> str:
+    url = base.rstrip("/")
+    if url.endswith("/audio/transcriptions"):
+        return url
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url + "/audio/transcriptions"
+
+
+def _local_whisper_transcribe(wav: bytes, model_name: str) -> str:
+    """faster-whisper on this machine (the model downloads once, on first use)."""
+    global _local_whisper
+    import io
+    from faster_whisper import WhisperModel
+    with _local_whisper_lock:
+        if _local_whisper is None:
+            try:
+                _local_whisper = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=True)
+            except Exception:
+                # The app runs Hugging Face offline (fast start); allow this one-time model download
+                from huggingface_hub import constants as _hf
+                prev, _hf.HF_HUB_OFFLINE = _hf.HF_HUB_OFFLINE, False
+                try:
+                    log.info("[whisper] downloading the %s model (first use)", model_name)
+                    _local_whisper = WhisperModel(model_name, device="cpu", compute_type="int8")
+                finally:
+                    _hf.HF_HUB_OFFLINE = prev
+        segments, _info = _local_whisper.transcribe(io.BytesIO(wav), vad_filter=True)
+        return " ".join(t for t in (s.text.strip() for s in segments) if t)
+
+
+@app.post("/api/chat/transcribe")
+async def api_chat_transcribe(request: Request, file: UploadFile = File(...)):
+    """Transcribe one WAV chunk of an attached video's soundtrack with Whisper → {text}."""
+    backend = _whisper_backend()
+    if not backend:
+        return JSONResponse({"error": "no Whisper is set up (add an OpenAI or Whisper connection, "
+                                      "set WHISPER_URL, or pip install faster-whisper)",
+                             "no_backend": True}, 503)
+    audio = await file.read()
+    if len(audio) > WHISPER_MAX_BYTES:
+        return JSONResponse({"error": "audio chunk too large"}, 413)
+    if len(audio) < 1000:
+        return JSONResponse({"text": "", "seconds": 0})
+    seconds = max((len(audio) - 44) / 32000, 1.0)   # 16 kHz mono 16-bit WAV
+    uid = _get_user_id(request)
+    charge = 0
+    if backend["platform"] and uid != "__local__":
+        charge = estimate_stt_credit_cost(seconds, provider="whisper")
+        if charge > 0 and get_user_credits(uid) < charge:
+            return JSONResponse({"error": "not enough credits to transcribe the audio", "redirect": "/store"}, 402)
+    try:
+        if backend.get("local"):
+            text = await asyncio.to_thread(_local_whisper_transcribe, audio, backend["model"])
+        else:
+            headers = {"Authorization": f"Bearer {backend['api_key']}"} if backend.get("api_key") else {}
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(_whisper_url(backend["url"]), headers=headers,
+                                         files={"file": ("audio.wav", audio, "audio/wav")},
+                                         data={"model": backend["model"], "response_format": "json"})
+            if resp.status_code != 200:
+                log.warning("[whisper] %s: %s", resp.status_code, resp.text[:300])
+                return JSONResponse({"error": f"Whisper error {resp.status_code}: {resp.text[:200]}"}, 502)
+            text = (resp.json().get("text") or "").strip()
+    except Exception as exc:
+        log.warning("[whisper] transcription failed: %s", exc)
+        return JSONResponse({"error": f"Whisper failed: {exc}"}, 502)
+    if charge > 0:
+        try:
+            deduct_user_credits(uid, charge, f"stt:whisper:{int(seconds)}s")
+        except Exception as exc:
+            log.warning("[credits] Whisper credit deduction failed: %s", exc)
+    return JSONResponse({"text": text, "seconds": round(seconds, 1)})
+
+
 class FolderCreate(BaseModel):
     name: str
 
