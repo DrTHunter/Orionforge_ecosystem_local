@@ -76,7 +76,7 @@
   .al-pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .78rem; line-height: 1.55; background: rgba(0,0,0,.25); border: 1px solid var(--bd); border-radius: .5rem; padding: .85rem; margin: 0; color: var(--tx); }
 
   /* conversation */
-  .al-convo { display: flex; flex-direction: column; gap: .5rem; max-height: 360px; overflow-y: auto; padding-right: .25rem; }
+  .al-convo { display: flex; flex-direction: column; gap: .5rem; max-height: 360px; overflow-y: auto; padding-right: .25rem; overflow-anchor: none; overscroll-behavior: contain; }
   .al-msg { max-width: 85%; padding: .55rem .8rem; border-radius: .75rem; font-size: .85rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
   .al-msg.op { align-self: flex-end; background: rgba(99,102,241,.16); border: 1px solid rgba(99,102,241,.3); }
   .al-msg.ag { align-self: flex-start; background: rgba(255,255,255,.04); border: 1px solid var(--bd); }
@@ -740,6 +740,7 @@
 <div class="al-toast" id="al-toast"></div>
 
 <script src="/static/attach.js"></script>
+<script src="/static/stablelog.js"></script>
 <script>
 const AL = {
   config: {{ config|tojson }},
@@ -911,15 +912,13 @@ async function loadConversation() {
   const r = await api('/api/agi-loop/conversation?limit=100');
   const box = $('convo');
   const msgs = r.messages || [];
-  const sig = msgs.length + ':' + (msgs.length ? msgs[msgs.length - 1].id || msgs[msgs.length - 1].ts : '');
-  if (!msgs.length) { box.innerHTML = '<div class="al-empty">No conversation yet. Messages you send arrive at its door.</div>'; }
-  else if (box._sig !== sig) {   // nothing new → leave the DOM (and your place in it) alone
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-    box.innerHTML = msgs.map(m => `<div class="al-msg ${m.role === 'agent' ? 'ag' : 'op'}">${esc(m.text)}<div class="meta">${esc(m.sender || m.role)} · ${clock(m.ts)}</div></div>`).join('');
-    if (atBottom || !box._seen) box.scrollTop = box.scrollHeight;
-    box._seen = true;
-  }
-  box._sig = sig;
+  const sig = msgs.map(m => m.id || m.ts).join('|');
+  // Nothing new → the DOM (and your place in it) is left alone. Something new → only that is
+  // patched in; you keep reading where you were unless you're at the bottom (see stablelog.js).
+  if (box._sig !== sig && patchLog(box, msgs, m => m.id || m.ts,
+        m => `<div class="al-msg ${m.role === 'agent' ? 'ag' : 'op'}">${esc(m.text)}<div class="meta">${esc(m.sender || m.role)} · ${clock(m.ts)}</div></div>`,
+        '<div class="al-empty">No conversation yet. Messages you send arrive at its door.</div>'))
+    box._sig = sig;
   const t = await api('/api/agi-loop/ticks?limit=1&brief=1&with_response=1');
   const last = (t.ticks || [])[0];
   if (last) {

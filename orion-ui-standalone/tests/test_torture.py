@@ -12165,17 +12165,35 @@ def test_chat_scroll_follows_only_at_bottom():
     check("chat: streaming text, thinking and tool notes follow only if you're at the bottom", calls.count("") >= 5, calls)
     check("chat: sending a message (or starting a run) always follows", calls.count("true") == 2, calls)
 
+    # Polled logs (group chat, the loop's door) used to be rebuilt wholesale on every change, which
+    # threw away your place and your selection and made the box jump. stablelog.js patches in place.
+    js = (tpl.parent / "static" / "stablelog.js").read_text(encoding="utf-8")
+    check("stablelog.js: patches by key, follows only within 40px of the bottom",
+          "window.patchLog = function (box, items, keyOf, html, emptyHtml)" in js
+          and "const follow = first || box.scrollHeight - box.scrollTop - box.clientHeight < 40;" in js)
+    check("stablelog.js: the message you were reading is pinned where it was",
+          "box.scrollTop += (anchor.getBoundingClientRect().top - box.getBoundingClientRect().top) - offset;" in js)
+    check("stablelog.js: reuses nodes, removes gone ones, refreshes changed ones in place",
+          "old.set(el.dataset.key, el)" in js and "while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }" in js
+          and "el.innerHTML = fresh.innerHTML;" in js)
+    check("stablelog.js: never touches the log while you're selecting text in it",
+          "if (sel && !sel.isCollapsed && sel.anchorNode && box.contains(sel.anchorNode)) return false;" in js)
+
     gc = (tpl / "group_chat.html").read_text(encoding="utf-8")
-    check("group chat: no unconditional jump to the bottom", re.search(r"^\s*gcLog\.scrollTop = gcLog\.scrollHeight;", gc, re.M) is None)
-    check("group chat: follows only at the bottom, on first load, or after you send",
-          "const follow = !gcLast || gcStick || gcLog.scrollHeight - gcLog.scrollTop - gcLog.clientHeight < 60;" in gc
-          and "if (follow) gcLog.scrollTop = gcLog.scrollHeight;" in gc)
-    check("group chat: sending sets the follow flag", "gcStick = true;" in gc)
+    check("group chat: loads stablelog.js and patches instead of rebuilding",
+          '<script src="/static/stablelog.js"></script>' in gc and "if (!patchLog(gcLog, d.messages, m => m.id," in gc
+          and "gcLog.innerHTML = d.messages" not in gc)
+    check("group chat: only your own send jumps to the bottom", "if (gcStick) gcLog.scrollTop = gcLog.scrollHeight;" in gc and "gcStick = true;" in gc
+          and re.search(r"^\s*gcLog\.scrollTop = gcLog\.scrollHeight;", gc, re.M) is None)
+    check("group chat: the browser's own scroll anchoring is off (we pin it ourselves)", "overflow-anchor: none" in gc and "min-height: 0" in gc)
 
     loop = (tpl / "agi_loop.html").read_text(encoding="utf-8")
-    check("loop page: conversation already follows only at the bottom",
-          "const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;" in loop
-          and "if (atBottom || !box._seen) box.scrollTop = box.scrollHeight;" in loop)
+    check("loop page: the door patches instead of rebuilding, keyed by message id",
+          '<script src="/static/stablelog.js"></script>' in loop and "patchLog(box, msgs, m => m.id || m.ts," in loop
+          and "box.innerHTML = msgs.map" not in loop)
+    check("loop page: nothing new → DOM untouched; signature covers every id", "const sig = msgs.map(m => m.id || m.ts).join('|');" in loop
+          and "if (box._sig !== sig && patchLog(" in loop)
+    check("loop page: browser scroll anchoring off on the door", ".al-convo {" in loop and "overflow-anchor: none" in loop)
 
 
 # ═════════════════════════════════════════════

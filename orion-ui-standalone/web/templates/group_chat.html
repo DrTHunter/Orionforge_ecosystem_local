@@ -12,7 +12,7 @@
   .gc-chips { display: flex; gap: .4rem; flex-wrap: wrap; }
   .gc-chip { font-size: .72rem; padding: .2rem .6rem; border-radius: 999px; border: 1px solid var(--bd); color: var(--mu); }
   .gc-chip.on { color: #34d399; border-color: #34d399; }
-  .gc-log { flex: 1; overflow-y: auto; background: var(--card); border: 1px solid var(--bd); border-radius: 12px; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; }
+  .gc-log { flex: 1; min-height: 0; overflow-y: auto; background: var(--card); border: 1px solid var(--bd); border-radius: 12px; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; overflow-anchor: none; overscroll-behavior: contain; }
   .gc-msg { max-width: 82%; padding: .55rem .8rem; border-radius: 12px; border: 1px solid var(--bd); white-space: pre-wrap; word-break: break-word; font-size: .9rem; line-height: 1.45; }
   .gc-msg.operator { align-self: flex-end; background: color-mix(in srgb, var(--acc) 18%, transparent); }
   .gc-who { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--mu); margin-bottom: .2rem; }
@@ -40,6 +40,7 @@
 </div>
 
 <script src="/static/attach.js"></script>
+<script src="/static/stablelog.js"></script>
 <script>
 const gcLog = document.getElementById('gc-log'), gcText = document.getElementById('gc-text');
 let gcLast = '';
@@ -55,15 +56,15 @@ async function gcLoad() {
       `<span class="gc-chip ${l.running ? 'on' : ''}">${gcEsc(l.agent)} · ${l.running ? 'awake' : 'stopped'}</span>`).join('');
     const sig = JSON.stringify(d.messages.map(m => m.id));
     if (sig === gcLast) return;
-    // Only follow new messages if you were already at the bottom (or it's the first load, or you just sent).
-    const follow = !gcLast || gcStick || gcLog.scrollHeight - gcLog.scrollTop - gcLog.clientHeight < 60;
+    // Only what changed is patched in; you keep your place unless you're at the bottom (stablelog.js).
+    // After you send, your own message is followed.
+    if (gcStick) gcLog.scrollTop = gcLog.scrollHeight;
+    if (!patchLog(gcLog, d.messages, m => m.id,
+          m => `<div class="gc-msg ${m.origin === 'operator' ? 'operator' : ''}">` +
+               `<div class="gc-who">${gcEsc(m.sender)}</div>${gcEsc(m.text)}</div>`,
+          '<div class="gc-empty">Nobody has said anything yet.</div>')) return;   // you're selecting text; next poll
     gcStick = false;
     gcLast = sig;
-    gcLog.innerHTML = d.messages.length ? d.messages.map(m =>
-      `<div class="gc-msg ${m.origin === 'operator' ? 'operator' : ''}">` +
-      `<div class="gc-who">${gcEsc(m.sender)}</div>${gcEsc(m.text)}</div>`).join('')
-      : '<div class="gc-empty">Nobody has said anything yet.</div>';
-    if (follow) gcLog.scrollTop = gcLog.scrollHeight;
   } catch (e) {}
 }
 document.getElementById('gc-form').addEventListener('submit', async e => {
